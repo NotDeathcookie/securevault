@@ -27,23 +27,17 @@ jobs:
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
       - name: Build
         run: cmake --build build
-      - name: Bundle runtime DLLs
-        # The MSYS2 glfw package is shared-only (no static .a), so glfw3.dll
-        # must ship alongside the exe. The compiler runtime (libstdc++,
-        # libgcc, winpthreads) is statically linked by CMakeLists.txt, so no
-        # other DLLs should be needed - but copy whatever's actually missing,
-        # just in case a future dependency gets added.
-        run: |
-          cd build
-          for dll in $(ntldd -R securevault.exe | awk '{print $3}' | grep -i '/ucrt64/'); do
-            cp -v "$dll" .
-          done
+      - name: Bundle runtime DLL
+        # The compiler runtime (libstdc++, libgcc, winpthreads) is statically
+        # linked by CMakeLists.txt. The MSYS2 glfw package is shared-only
+        # though, so glfw3.dll must ship alongside the exe.
+        run: cp /ucrt64/bin/glfw3.dll build/
       - uses: actions/upload-artifact@v4
         with:
           name: securevault-windows
           path: |
             build/securevault.exe
-            build/*.dll
+            build/glfw3.dll
 
   linux:
     runs-on: ubuntu-latest
