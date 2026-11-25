@@ -1,0 +1,8 @@
+build/
+build-win/
+*.exe
+*.o
+*.obj
+imgui.ini
+CMakeCache.txt
+CMakeFiles/
