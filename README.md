@@ -1,116 +1,106 @@
-# Secure Vault (C++ GUI edition)
+# SecureVault
 
-A C++17 / Dear ImGui rewrite of `secure_vault-wy-hash.py`. Same crypto
-(AES-256-GCM, PBKDF2-HMAC-SHA256 @ 600,000 rounds), same file container
-format for `.enc` files, same multi-pass shredding and multi-algorithm
-hashing — now with a GUI styled after the pink-neon card dashboard you
-provided, instead of a terminal menu.
+An open-source desktop app for encrypting text, files, and folders, with secure file shredding and file hashing built in. Written in C++ with a custom [Dear ImGui](https://github.com/ocornut/imgui) interface.
 
-Prebuilt binaries are attached to each GitHub Release, and every push builds Windows and Linux artifacts via GitHub Actions.
+## Features
 
-## Layout
+- **Encrypt and decrypt** text, single files, and whole folders
+- **AES-256-GCM** authenticated encryption, so a wrong password or tampered data is detected rather than silently producing garbage
+- **PBKDF2-HMAC-SHA256** key derivation (600,000 iterations) with a random salt per file
+- **Password or key file**: unlock with a passphrase, or use any file as the key
+- **Secure shred**: overwrite files or folders with random data (1 to 5 passes) before deleting
+- **File hashing**: SHA-256, SHA-512, SHA-384, SHA-1, MD5
+- **Private mode**: masks the password field and hides the activity log
+- Large files are processed in 64 KB chunks on a background thread, with a live progress bar
 
-```
-src/
-  vault.hpp / vault.cpp   crypto + file/folder/hash/shred logic (OpenSSL)
-  theme.hpp               colors, rounded "card" styling, flower glyph, backdrop
-  main.cpp                Dear ImGui dashboard UI + app state
-third_party/imgui/        Dear ImGui (vendored, trimmed to what's needed)
-CMakeLists.txt
-```
+## Download
 
-## What maps to what, vs. the screenshot
+Grab the latest build from the [Releases](../../releases) page.
 
-| Screenshot card      | This app                                             |
-|-----------------------|-------------------------------------------------------|
-| Top bar / logo / tabs | VAULT logo, Home / Log / Tools tabs, PRIVATE toggle   |
-| STAGE / mode buttons  | OPERATION card: TEXT / FILE / FOLDER + ENCRYPT/DECRYPT pills |
-| PREDICTION / CAPTURE  | STATUS card: idle/running dot, cipher + KDF info      |
-| AUTOPLAY / Start      | Password or key-file input + START button + progress bar |
-| WEAKEST %             | RESULT card: decrypted text / payload / messages      |
-| ONLINE NOW graph      | ACTIVITY card: live progress sparkline + op counter   |
-| ALL LEVELS stats      | STATISTICS card: attempts / successes / failures / rate |
-| Footer toggles        | PRIVATE mode masks the password field and hides the log |
+- **Windows:** download `securevault.exe` and run it. No installer and nothing else to install.
+- **Linux:** extract the archive, run `chmod +x securevault`, then run it. Requires GLFW and OpenSSL (`libglfw3`, `libssl3`).
 
-`Tools` holds standalone **Hash a file** and **Secure shred** (these don't
-need a password, so they're split out from the main encrypt/decrypt flow).
+## Using it
+
+1. Pick **TEXT**, **FILE**, or **FOLDER**, then **ENCRYPT** or **DECRYPT**.
+2. Enter the text or the path to the file or folder.
+3. Enter a password, or tick *Use key file* and give the path to your key file.
+4. Click **START**.
+
+Output naming:
+
+| Operation | Output |
+|---|---|
+| Encrypt file | `name.ext.enc` next to the original |
+| Decrypt file | original name (`.enc` removed), or `name.decrypted` |
+| Encrypt folder | `foldername_folder.enc` |
+| Decrypt folder | `foldername_restored/` |
+| Encrypt text | base64 text shown in the Result box |
+
+The original is never deleted automatically. Use the **Tools** tab to shred it once you've confirmed the encrypted copy works.
 
 ## Building from source
 
-Dependencies (Ubuntu/Debian):
-```
-apt-get install build-essential cmake pkg-config libglfw3-dev libssl-dev libgl1-mesa-dev
-```
+Requirements: a C++17 compiler, CMake 3.16+, GLFW 3, and OpenGL. Linux and macOS also need OpenSSL. Windows does not, because it uses the operating system's built-in crypto (CNG).
 
+**Linux (Debian/Ubuntu)**
 ```
+sudo apt install build-essential cmake pkg-config libglfw3-dev libssl-dev libgl1-mesa-dev
 mkdir build && cd build
 cmake ..
 make -j4
 ./securevault
 ```
 
-On macOS: `brew install glfw openssl cmake`, then point CMake at OpenSSL
-with `-DOPENSSL_ROOT_DIR=$(brew --prefix openssl)`.
-
-### Windows
-
-A prebuilt, statically-linked `securevault.exe` is available from Releases — it
-only touches standard Windows DLLs (bcrypt, gdi32, opengl32, user32, etc.),
-so it runs on a bare Windows machine with nothing extra installed, and you
-can copy just that one file anywhere.
-
-To build it yourself (e.g. via MSYS2 UCRT64 — `pacman -S --needed
-base-devel mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-cmake
-mingw-w64-ucrt-x86_64-glfw`):
-
+**macOS**
 ```
+brew install glfw openssl cmake
+mkdir build && cd build
+cmake .. -DOPENSSL_ROOT_DIR=$(brew --prefix openssl)
+make -j4
+```
+
+**Windows (MSYS2 UCRT64)**
+```
+pacman -S --needed mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-glfw
 mkdir build && cd build
 cmake -G "MinGW Makefiles" ..
 cmake --build .
 ```
+The CMake file links the compiler runtime statically on Windows, so the resulting `securevault.exe` runs on machines without MSYS2.
 
-On Windows this build uses the OS's own crypto (CNG/`bcrypt.h`), **not
-OpenSSL** — so there's no OpenSSL dependency to install on Windows at all;
-`find_package(OpenSSL)` only runs on Linux/macOS. If you want the resulting
-`.exe` to run on machines that don't have MSYS2 installed, statically link
-the compiler runtime, or it'll depend on `libstdc++-6.dll` /
-`libgcc_s_seh-1.dll` / `libwinpthread-1.dll` / `glfw3.dll` from your MSYS2
-install:
+## Project layout
 
 ```
-cmake --build . -- LDFLAGS="-static-libgcc -static-libstdc++ -static -mwindows"
+src/
+  main.cpp                  UI and application state
+  theme.hpp                 colors and styling
+  vault.hpp / vault.cpp     text, file, folder, hash, and shred logic
+  vault_crypto.hpp          crypto interface
+  vault_crypto_openssl.cpp  Linux/macOS backend (OpenSSL)
+  vault_crypto_win.cpp      Windows backend (CNG / bcrypt)
+third_party/imgui/          Dear ImGui
+original_python_source.py   the original Python prototype, kept for reference
 ```
 
-(or add `target_link_options(securevault PRIVATE -static-libgcc
--static-libstdc++ -static -mwindows)` to `CMakeLists.txt`, which is already
-done for you — it only applies when CMake's target platform is Windows.)
+## Technical details
 
-## Notes on the port
+- **File format:** a 16-byte salt, followed by chunks of `[4-byte big-endian length][12-byte nonce | ciphertext | 16-byte tag]`. Each chunk gets a fresh random nonce.
+- **Text format:** base64 of `salt (16) | nonce (12) | ciphertext | tag (16)`.
+- **Folders** are packed into a simple custom archive (relative path, size, bytes for each file) and then encrypted like a single file. This is not a ZIP file.
 
-- **Folder encryption** no longer depends on Python's `zipfile`. It uses a
-  small custom container (relative path + size + bytes per file, recursively)
-  before running it through the same chunked AES-GCM file encryption — so no
-  extra zip library dependency. It is *not* ZIP-compatible, but round-trips
-  losslessly (verified in testing).
-- **File `.enc` format** is byte-for-byte compatible with the Python
-  version's layout: `salt(16)` header, then repeated
-  `[u32 big-endian length][nonce(12) || ciphertext || tag(16)]` chunks — so
-  files encrypted by one implementation decrypt correctly in the other.
-- Long operations (file/folder encrypt/decrypt, hashing, shredding) run on a
-  background thread so the UI stays responsive and shows a live progress bar.
-- This build was compiled and round-trip tested in a headless container
-  (no display attached), so the window itself could not be visually
-  screenshotted here — but the link/compile succeeded and the crypto/file/
-  hash/shred logic in `vault.cpp` was exercised end-to-end via a standalone
-  test (text encrypt/decrypt incl. wrong-password rejection, file round-trip,
-  folder round-trip via `diff -r`, hashing, and shredding). Please run it on
-  your machine to confirm the on-screen look — if anything about the layout
-  should be adjusted to better match your reference image, let me know.
+## Limitations
+
+This is a hobby project and has **not been independently audited**. Don't rely on it as the only copy of anything important.
+
+- Chunks are authenticated individually, but the file format does not protect against chunks being removed from the end or reordered.
+- Secure shredding overwrites the file's contents, but on SSDs, journaling or copy-on-write filesystems, and synced folders (OneDrive, Dropbox), old copies of the data may still exist elsewhere. It is not a guarantee of unrecoverable deletion.
+- There is no password recovery. If you lose the password or key file, the data is gone.
+
+## Contributing
+
+Issues and pull requests are welcome.
 
 ## License
 
-MIT — see `LICENSE`. Bundled third-party code: Dear ImGui (MIT, `third_party/imgui/LICENSE.txt`). GLFW (zlib) and OpenSSL (Apache-2.0, Linux/macOS builds only) are linked, not bundled.
-
-## Security note
-
-This is a hobby project and has not been independently audited. Don't rely on it as your only copy of anything important.
+MIT. See [LICENSE](LICENSE). Dear ImGui is bundled under its own MIT license (`third_party/imgui/LICENSE.txt`).
