@@ -1,5 +1,9 @@
 # SecureVault
 
+![Build](https://github.com/NotDeathcookie/securevault/actions/workflows/build.yml/badge.svg)
+
+![SecureVault](docs/screenshot.png)
+
 An open-source desktop app for encrypting text, files, and folders, with secure file shredding and file hashing built in. Written in C++ with a custom [Dear ImGui](https://github.com/ocornut/imgui) interface.
 
 ## Features
