@@ -117,6 +117,46 @@ std::string DecryptText(const std::vector<uint8_t>& secret, const std::string& p
 }
 
 // ---- file encryption ------------------------------------------------------
+//
+// Container format v2
+//   header (25 bytes): "SVLT" | version (0x02) | chunk_size u32 BE | salt (16)
+//   then one or more chunks:
+//     u32 BE  word = (final_flag << 31) | ciphertext_len   (ciphertext incl. 16-byte tag)
+//     bytes   AES-256-GCM ciphertext + tag
+//
+//   key    = PBKDF2-HMAC-SHA256(secret, salt)       (unique per file: random salt)
+//   nonce  = 4 zero bytes | chunk_index u64 BE      (counter; key is never reused across files)
+//   AAD    = header | final_flag byte
+//
+// Because the nonce encodes the chunk index, moving or duplicating a chunk makes
+// its tag fail. Because every chunk's AAD carries the final flag and the reader
+// requires exactly one final chunk at the very end, cutting chunks off the end
+// (or appending data) is detected. The header is authenticated by every chunk.
+//
+// Legacy v1 files (salt | [u32 len][nonce | ct+tag]...) are still readable.
+
+static const uint8_t kMagic[4] = {'S', 'V', 'L', 'T'};
+constexpr uint8_t  kFormatVersion = 2;
+constexpr size_t   kHeaderLen = 4 + 1 + 4 + kSaltLen;  // 25
+constexpr uint32_t kMaxChunkSize = 16u * 1024 * 1024;
+
+static void MakeNonce(uint64_t counter, uint8_t nonce[kNonceLen]) {
+    std::memset(nonce, 0, kNonceLen);
+    for (int i = 0; i < 8; i++) nonce[4 + i] = uint8_t(counter >> (8 * (7 - i)));
+}
+
+static std::vector<uint8_t> BuildAad(const uint8_t* header, bool final_chunk) {
+    std::vector<uint8_t> aad(header, header + kHeaderLen);
+    aad.push_back(final_chunk ? 1 : 0);
+    return aad;
+}
+
+static void PutU32(uint8_t* p, uint32_t v) {
+    p[0] = uint8_t(v >> 24); p[1] = uint8_t(v >> 16); p[2] = uint8_t(v >> 8); p[3] = uint8_t(v);
+}
+static uint32_t GetU32(const uint8_t* p) {
+    return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | uint32_t(p[3]);
+}
 
 void EncryptFile(const std::vector<uint8_t>& secret, const fs::path& in, const fs::path& out,
                   VaultJob& job) {
@@ -124,46 +164,151 @@ void EncryptFile(const std::vector<uint8_t>& secret, const fs::path& in, const f
     uint64_t total_size = fs::file_size(in, ec);
     if (ec) { job.SetResult(false, "Could not stat input file: " + ec.message()); return; }
 
+    // Write to a temp name and rename on success, so a failed run never leaves
+    // a half-written file under the real name.
+    fs::path tmp = out;
+    tmp += ".part";
+
     std::ifstream fin(in, std::ios::binary);
-    std::ofstream fout(out, std::ios::binary);
+    std::ofstream fout(tmp, std::ios::binary);
     if (!fin || !fout) { job.SetResult(false, "Could not open input/output file."); return; }
 
     try {
         auto salt = RandomBytes(kSaltLen);
+        uint8_t header[kHeaderLen];
+        std::memcpy(header, kMagic, 4);
+        header[4] = kFormatVersion;
+        PutU32(header + 5, (uint32_t)kChunkSize);
+        std::memcpy(header + 9, salt.data(), kSaltLen);
+
         auto key = DeriveKey(secret, salt.data(), salt.size());
-        fout.write(reinterpret_cast<const char*>(salt.data()), salt.size());
+        fout.write(reinterpret_cast<const char*>(header), kHeaderLen);
 
         std::vector<uint8_t> chunk(kChunkSize);
-        uint64_t processed = 0;
-        while (fin) {
-            fin.read(reinterpret_cast<char*>(chunk.data()), kChunkSize);
-            std::streamsize got = fin.gcount();
-            if (got <= 0) break;
+        uint64_t counter = 0, processed = 0;
+        bool final_chunk = false;
+        while (!final_chunk) {
+            fin.read(reinterpret_cast<char*>(chunk.data()), (std::streamsize)kChunkSize);
+            size_t got = (size_t)fin.gcount();
+            if (fin.bad()) throw std::runtime_error("Read error on input file.");
+            final_chunk = (fin.peek() == std::ifstream::traits_type::eof());
 
-            auto nonce = RandomBytes(kNonceLen);
-            auto enc = AesGcmEncrypt(key, nonce.data(), chunk.data(), (size_t)got);
+            uint8_t nonce[kNonceLen];
+            MakeNonce(counter, nonce);
+            auto aad = BuildAad(header, final_chunk);
+            auto enc = AesGcmEncrypt(key, nonce, chunk.data(), got, aad.data(), aad.size());
 
-            std::vector<uint8_t> payload;
-            payload.reserve(nonce.size() + enc.size());
-            payload.insert(payload.end(), nonce.begin(), nonce.end());
-            payload.insert(payload.end(), enc.begin(), enc.end());
+            uint8_t word[4];
+            PutU32(word, (uint32_t)enc.size() | (final_chunk ? 0x80000000u : 0u));
+            fout.write(reinterpret_cast<const char*>(word), 4);
+            fout.write(reinterpret_cast<const char*>(enc.data()), (std::streamsize)enc.size());
 
-            uint32_t plen = (uint32_t)payload.size();
-            uint8_t lenbuf[4] = {uint8_t(plen >> 24), uint8_t(plen >> 16),
-                                  uint8_t(plen >> 8), uint8_t(plen)};
-            fout.write(reinterpret_cast<const char*>(lenbuf), 4);
-            fout.write(reinterpret_cast<const char*>(payload.data()), payload.size());
-
-            processed += (uint64_t)got;
+            counter++;
+            processed += got;
             job.progress = total_size > 0 ? (float)((double)processed / (double)total_size) : 1.0f;
         }
+        fout.flush();
+        if (!fout) throw std::runtime_error("Write failed (disk full?).");
+        fout.close();
+        fin.close();
+
+        fs::remove(out, ec);
+        fs::rename(tmp, out);
         job.progress = 1.0f;
         job.SetResult(true, "File encrypted successfully.", out.string());
     } catch (const std::exception& e) {
         fout.close();
         std::error_code rm_ec;
-        fs::remove(out, rm_ec);
+        fs::remove(tmp, rm_ec);
         job.SetResult(false, std::string("Encryption failed: ") + e.what());
+    }
+}
+
+// Reads and verifies a v2 stream (header already consumed into `header`).
+static void DecryptStreamV2(const std::vector<uint8_t>& secret, std::ifstream& fin,
+                             const uint8_t* header, uint64_t total_size, std::ofstream& fout,
+                             VaultJob& job) {
+    uint32_t chunk_size = GetU32(header + 5);
+    if (chunk_size == 0 || chunk_size > kMaxChunkSize)
+        throw std::runtime_error("Corrupted file header.");
+
+    auto key = DeriveKey(secret, header + 9, kSaltLen);
+    const size_t max_ct = (size_t)chunk_size + kTagLen;
+
+    uint64_t counter = 0, processed = kHeaderLen;
+    bool saw_final = false;
+    while (true) {
+        uint8_t word[4];
+        fin.read(reinterpret_cast<char*>(word), 4);
+        std::streamsize got = fin.gcount();
+        if (got == 0) break;  // clean end of file
+        if (got < 4) throw std::runtime_error("Corrupted file (truncated chunk header).");
+        if (saw_final)
+            throw std::runtime_error("Unexpected data after the final chunk - the file was modified.");
+
+        uint32_t w = GetU32(word);
+        bool final_chunk = (w & 0x80000000u) != 0;
+        size_t ct_len = (size_t)(w & 0x7FFFFFFFu);
+        if (ct_len < kTagLen || ct_len > max_ct)
+            throw std::runtime_error("Corrupted file (bad chunk length).");
+        if (!final_chunk && ct_len != max_ct)
+            throw std::runtime_error("Corrupted file (short non-final chunk).");
+
+        std::vector<uint8_t> ct(ct_len);
+        fin.read(reinterpret_cast<char*>(ct.data()), (std::streamsize)ct_len);
+        if ((size_t)fin.gcount() != ct_len)
+            throw std::runtime_error("Corrupted file (truncated chunk).");
+
+        uint8_t nonce[kNonceLen];
+        MakeNonce(counter, nonce);
+        auto aad = BuildAad(header, final_chunk);
+        auto pt = AesGcmDecrypt(key, nonce, ct.data(), ct.size(), aad.data(), aad.size());
+        fout.write(reinterpret_cast<const char*>(pt.data()), (std::streamsize)pt.size());
+
+        saw_final = final_chunk;
+        counter++;
+        processed += 4 + ct_len;
+        job.progress = total_size > 0
+                            ? std::min(1.0f, (float)((double)processed / (double)total_size))
+                            : 1.0f;
+    }
+    if (!saw_final)
+        throw std::runtime_error("File is truncated (the final chunk is missing).");
+}
+
+// Legacy v1: salt | [u32 len][nonce | ct+tag] ... (no ordering/truncation protection).
+static void DecryptStreamV1(const std::vector<uint8_t>& secret, std::ifstream& fin,
+                             uint64_t total_size, std::ofstream& fout, VaultJob& job) {
+    uint8_t salt[kSaltLen];
+    fin.read(reinterpret_cast<char*>(salt), kSaltLen);
+    if (fin.gcount() < (std::streamsize)kSaltLen)
+        throw std::runtime_error("Corrupted file header (salt missing).");
+
+    auto key = DeriveKey(secret, salt, kSaltLen);
+    uint64_t processed = kSaltLen;
+    while (fin) {
+        uint8_t lenbuf[4];
+        fin.read(reinterpret_cast<char*>(lenbuf), 4);
+        std::streamsize got_len = fin.gcount();
+        if (got_len == 0) break;
+        if (got_len < 4) throw std::runtime_error("Corrupted file (truncated length).");
+
+        uint32_t plen = GetU32(lenbuf);
+        if (plen < kNonceLen + kTagLen || plen > (1u << 20))
+            throw std::runtime_error("Corrupted file (bad chunk length).");
+        std::vector<uint8_t> payload(plen);
+        fin.read(reinterpret_cast<char*>(payload.data()), plen);
+        if ((uint32_t)fin.gcount() != plen)
+            throw std::runtime_error("Corrupted file (truncated chunk).");
+
+        auto pt = AesGcmDecrypt(key, payload.data(), payload.data() + kNonceLen,
+                                 payload.size() - kNonceLen);
+        fout.write(reinterpret_cast<const char*>(pt.data()), (std::streamsize)pt.size());
+
+        processed += 4 + plen;
+        job.progress = total_size > 0
+                            ? std::min(1.0f, (float)((double)processed / (double)total_size))
+                            : 1.0f;
     }
 }
 
@@ -173,52 +318,46 @@ void DecryptFile(const std::vector<uint8_t>& secret, const fs::path& in, const f
     uint64_t total_size = fs::file_size(in, ec);
     if (ec) { job.SetResult(false, "Could not stat input file: " + ec.message()); return; }
 
+    fs::path tmp = out;
+    tmp += ".part";
+
     std::ifstream fin(in, std::ios::binary);
-    std::ofstream fout(out, std::ios::binary);
+    std::ofstream fout(tmp, std::ios::binary);
     if (!fin || !fout) { job.SetResult(false, "Could not open input/output file."); return; }
 
     try {
-        uint8_t salt[kSaltLen];
-        fin.read(reinterpret_cast<char*>(salt), kSaltLen);
-        if (fin.gcount() < (std::streamsize)kSaltLen)
-            throw std::runtime_error("Corrupted file header (salt missing).");
+        uint8_t header[kHeaderLen];
+        fin.read(reinterpret_cast<char*>(header), kHeaderLen);
+        size_t got = (size_t)fin.gcount();
 
-        auto key = DeriveKey(secret, salt, kSaltLen);
-        uint64_t processed = kSaltLen;
-
-        while (fin) {
-            uint8_t lenbuf[4];
-            fin.read(reinterpret_cast<char*>(lenbuf), 4);
-            std::streamsize got_len = fin.gcount();
-            if (got_len == 0) break;
-            if (got_len < 4) throw std::runtime_error("Corrupted file (truncated length).");
-
-            uint32_t plen = (uint32_t(lenbuf[0]) << 24) | (uint32_t(lenbuf[1]) << 16) |
-                             (uint32_t(lenbuf[2]) << 8) | uint32_t(lenbuf[3]);
-            std::vector<uint8_t> payload(plen);
-            fin.read(reinterpret_cast<char*>(payload.data()), plen);
-            if ((uint32_t)fin.gcount() != plen)
-                throw std::runtime_error("Corrupted file (truncated chunk).");
-
-            if (payload.size() < kNonceLen) throw std::runtime_error("Corrupted chunk.");
-            const uint8_t* nonce = payload.data();
-            const uint8_t* ct = payload.data() + kNonceLen;
-            size_t ct_len = payload.size() - kNonceLen;
-
-            auto pt = AesGcmDecrypt(key, nonce, ct, ct_len);
-            fout.write(reinterpret_cast<const char*>(pt.data()), pt.size());
-
-            processed += 4 + plen;
-            job.progress = total_size > 0
-                                ? std::min(1.0f, (float)((double)processed / (double)total_size))
-                                : 1.0f;
+        std::string note;
+        if (got >= 5 && std::memcmp(header, kMagic, 4) == 0) {
+            if (header[4] != kFormatVersion)
+                throw std::runtime_error("Unsupported file format version " +
+                                          std::to_string((int)header[4]) + ".");
+            if (got < kHeaderLen) throw std::runtime_error("Corrupted file header.");
+            DecryptStreamV2(secret, fin, header, total_size, fout, job);
+        } else {
+            // Not a v2 file: treat as a legacy v1 file.
+            fin.clear();
+            fin.seekg(0);
+            DecryptStreamV1(secret, fin, total_size, fout, job);
+            note = " (legacy v1 file - re-encrypt it to get tamper and truncation protection)";
         }
+
+        fout.flush();
+        if (!fout) throw std::runtime_error("Write failed (disk full?).");
+        fout.close();
+        fin.close();
+
+        fs::remove(out, ec);
+        fs::rename(tmp, out);
         job.progress = 1.0f;
-        job.SetResult(true, "File decrypted successfully.", out.string());
+        job.SetResult(true, "File decrypted successfully." + note, out.string());
     } catch (const std::exception& e) {
         fout.close();
         std::error_code rm_ec;
-        fs::remove(out, rm_ec);
+        fs::remove(tmp, rm_ec);
         job.SetResult(false, std::string("Decryption failed: ") + e.what());
     }
 }
@@ -249,6 +388,18 @@ static uint64_t ReadU64(std::ifstream& f) {
     uint64_t v = 0;
     for (int i = 0; i < 8; i++) v = (v << 8) | b[i];
     return v;
+}
+
+// The temporary archive holds the folder's plaintext, so overwrite it once
+// before deleting (best effort; see the shredding caveats in the README).
+static void RemoveTempPlaintext(const fs::path& p) {
+    std::error_code ec;
+    try {
+        VaultJob scratch;
+        ShredFile(p, 1, scratch);
+    } catch (...) {
+    }
+    fs::remove(p, ec);
 }
 
 void EncryptFolder(const std::vector<uint8_t>& secret, const fs::path& folder,
@@ -294,8 +445,7 @@ void EncryptFolder(const std::vector<uint8_t>& secret, const fs::path& folder,
         VaultJob sub;
         EncryptFile(secret, temp_archive, out, sub);
         job.progress = 0.3f + 0.7f * sub.progress.load();
-        std::error_code rm_ec;
-        fs::remove(temp_archive, rm_ec);
+        RemoveTempPlaintext(temp_archive);
 
         if (sub.ok) {
             job.progress = 1.0f;
@@ -318,8 +468,7 @@ void DecryptFolder(const std::vector<uint8_t>& secret, const fs::path& archive,
         DecryptFile(secret, archive, temp_archive, sub);
         job.progress = 0.6f * sub.progress.load();
         if (!sub.ok) {
-            std::error_code rm_ec;
-            fs::remove(temp_archive, rm_ec);
+            RemoveTempPlaintext(temp_archive);
             job.SetResult(false, sub.result_text);
             return;
         }
@@ -335,7 +484,14 @@ void DecryptFolder(const std::vector<uint8_t>& secret, const fs::path& archive,
             fin.read(rel.data(), path_len);
             uint64_t fsize = ReadU64(fin);
 
-            fs::path dest = out_folder / fs::path(rel);
+            fs::path relp(rel);
+            bool unsafe = rel.empty() || relp.is_absolute() || relp.has_root_name() ||
+                          relp.has_root_directory();
+            for (const auto& part : relp)
+                if (part == "..") unsafe = true;
+            if (unsafe || !fin) throw std::runtime_error("Archive contains an unsafe or corrupt entry.");
+
+            fs::path dest = out_folder / relp;
             fs::create_directories(dest.parent_path());
             std::ofstream fout(dest, std::ios::binary);
             std::vector<char> buf(kChunkSize);
@@ -349,8 +505,8 @@ void DecryptFolder(const std::vector<uint8_t>& secret, const fs::path& archive,
             job.progress = std::min(1.0f, job.progress.load() + 0.02f);
         }
 
-        std::error_code rm_ec;
-        fs::remove(temp_archive, rm_ec);
+        fin.close();
+        RemoveTempPlaintext(temp_archive);
         job.progress = 1.0f;
         job.SetResult(true, "Folder restored successfully.", out_folder.string());
     } catch (const std::exception& e) {

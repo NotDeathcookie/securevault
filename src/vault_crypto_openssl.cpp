@@ -49,7 +49,8 @@ std::array<uint8_t, kKeyLen> DeriveKey(const std::vector<uint8_t>& secret,
 
 std::vector<uint8_t> AesGcmEncrypt(const std::array<uint8_t, kKeyLen>& key,
                                     const uint8_t* nonce,
-                                    const uint8_t* plaintext, size_t len) {
+                                    const uint8_t* plaintext, size_t len,
+                                    const uint8_t* aad, size_t aad_len) {
     EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
     if (!ctx) throw std::runtime_error("EVP_CIPHER_CTX_new failed");
     std::vector<uint8_t> out(len + kTagLen);
@@ -61,6 +62,9 @@ std::vector<uint8_t> AesGcmEncrypt(const std::array<uint8_t, kKeyLen>& key,
             throw std::runtime_error("Set IV len failed");
         if (EVP_EncryptInit_ex(ctx, nullptr, nullptr, key.data(), nonce) != 1)
             throw std::runtime_error("EncryptInit (key/iv) failed");
+        if (aad_len > 0 &&
+            EVP_EncryptUpdate(ctx, nullptr, &tmp, aad, (int)aad_len) != 1)
+            throw std::runtime_error("AAD update failed");
         if (len > 0) {
             if (EVP_EncryptUpdate(ctx, out.data(), &outl, plaintext, (int)len) != 1)
                 throw std::runtime_error("EncryptUpdate failed");
@@ -82,7 +86,8 @@ std::vector<uint8_t> AesGcmEncrypt(const std::array<uint8_t, kKeyLen>& key,
 
 std::vector<uint8_t> AesGcmDecrypt(const std::array<uint8_t, kKeyLen>& key,
                                     const uint8_t* nonce,
-                                    const uint8_t* ciphertext_and_tag, size_t len) {
+                                    const uint8_t* ciphertext_and_tag, size_t len,
+                                    const uint8_t* aad, size_t aad_len) {
     if (len < kTagLen) throw std::runtime_error("Ciphertext too short");
     size_t ct_len = len - kTagLen;
     const uint8_t* tag = ciphertext_and_tag + ct_len;
@@ -99,6 +104,9 @@ std::vector<uint8_t> AesGcmDecrypt(const std::array<uint8_t, kKeyLen>& key,
             throw std::runtime_error("Set IV len failed");
         if (EVP_DecryptInit_ex(ctx, nullptr, nullptr, key.data(), nonce) != 1)
             throw std::runtime_error("DecryptInit (key/iv) failed");
+        if (aad_len > 0 &&
+            EVP_DecryptUpdate(ctx, nullptr, &tmp, aad, (int)aad_len) != 1)
+            throw std::runtime_error("AAD update failed");
         if (ct_len > 0) {
             if (EVP_DecryptUpdate(ctx, out.data(), &outl, ciphertext_and_tag, (int)ct_len) != 1)
                 throw std::runtime_error("DecryptUpdate failed");

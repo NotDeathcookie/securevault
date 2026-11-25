@@ -31,12 +31,16 @@ std::array<uint8_t, kKeyLen> DeriveKey(const std::vector<uint8_t>& secret,
 
 // Throws std::runtime_error on failure (bad tag on decrypt == wrong
 // password/key or tampered data).
+// `aad` is additional authenticated data: not encrypted, but covered by the
+// tag, so changing it makes decryption fail.
 std::vector<uint8_t> AesGcmEncrypt(const std::array<uint8_t, kKeyLen>& key,
                                     const uint8_t* nonce,
-                                    const uint8_t* plaintext, size_t len);
+                                    const uint8_t* plaintext, size_t len,
+                                    const uint8_t* aad = nullptr, size_t aad_len = 0);
 std::vector<uint8_t> AesGcmDecrypt(const std::array<uint8_t, kKeyLen>& key,
                                     const uint8_t* nonce,
-                                    const uint8_t* ciphertext_and_tag, size_t len);
+                                    const uint8_t* ciphertext_and_tag, size_t len,
+                                    const uint8_t* aad = nullptr, size_t aad_len = 0);
 
 // Streaming digest, used by HashFile() to hash large files in chunks.
 class Hasher {
