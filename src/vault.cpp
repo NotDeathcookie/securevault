@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <stdexcept>
 
 #if defined(_WIN32)
@@ -225,8 +226,10 @@ void EncryptFile(const std::vector<uint8_t>& secret, const fs::path& in, const f
 }
 
 // Reads and verifies a v2 stream (header already consumed into `header`).
+using Sink = std::function<void(const uint8_t*, size_t)>;
+
 static void DecryptStreamV2(const std::vector<uint8_t>& secret, std::ifstream& fin,
-                             const uint8_t* header, uint64_t total_size, std::ofstream& fout,
+                             const uint8_t* header, uint64_t total_size, const Sink& sink,
                              VaultJob& job) {
     uint32_t chunk_size = GetU32(header + 5);
     if (chunk_size == 0 || chunk_size > kMaxChunkSize)
@@ -263,7 +266,7 @@ static void DecryptStreamV2(const std::vector<uint8_t>& secret, std::ifstream& f
         MakeNonce(counter, nonce);
         auto aad = BuildAad(header, final_chunk);
         auto pt = AesGcmDecrypt(key, nonce, ct.data(), ct.size(), aad.data(), aad.size());
-        fout.write(reinterpret_cast<const char*>(pt.data()), (std::streamsize)pt.size());
+        sink(pt.data(), pt.size());
 
         saw_final = final_chunk;
         counter++;
@@ -278,7 +281,7 @@ static void DecryptStreamV2(const std::vector<uint8_t>& secret, std::ifstream& f
 
 // Legacy v1: salt | [u32 len][nonce | ct+tag] ... (no ordering/truncation protection).
 static void DecryptStreamV1(const std::vector<uint8_t>& secret, std::ifstream& fin,
-                             uint64_t total_size, std::ofstream& fout, VaultJob& job) {
+                             uint64_t total_size, const Sink& sink, VaultJob& job) {
     uint8_t salt[kSaltLen];
     fin.read(reinterpret_cast<char*>(salt), kSaltLen);
     if (fin.gcount() < (std::streamsize)kSaltLen)
@@ -303,7 +306,7 @@ static void DecryptStreamV1(const std::vector<uint8_t>& secret, std::ifstream& f
 
         auto pt = AesGcmDecrypt(key, payload.data(), payload.data() + kNonceLen,
                                  payload.size() - kNonceLen);
-        fout.write(reinterpret_cast<const char*>(pt.data()), (std::streamsize)pt.size());
+        sink(pt.data(), pt.size());
 
         processed += 4 + plen;
         job.progress = total_size > 0
@@ -330,18 +333,21 @@ void DecryptFile(const std::vector<uint8_t>& secret, const fs::path& in, const f
         fin.read(reinterpret_cast<char*>(header), kHeaderLen);
         size_t got = (size_t)fin.gcount();
 
+        Sink writeOut = [&fout](const uint8_t* d, size_t n) {
+            fout.write(reinterpret_cast<const char*>(d), (std::streamsize)n);
+        };
         std::string note;
         if (got >= 5 && std::memcmp(header, kMagic, 4) == 0) {
             if (header[4] != kFormatVersion)
                 throw std::runtime_error("Unsupported file format version " +
                                           std::to_string((int)header[4]) + ".");
             if (got < kHeaderLen) throw std::runtime_error("Corrupted file header.");
-            DecryptStreamV2(secret, fin, header, total_size, fout, job);
+            DecryptStreamV2(secret, fin, header, total_size, writeOut, job);
         } else {
             // Not a v2 file: treat as a legacy v1 file.
             fin.clear();
             fin.seekg(0);
-            DecryptStreamV1(secret, fin, total_size, fout, job);
+            DecryptStreamV1(secret, fin, total_size, writeOut, job);
             note = " (legacy v1 file - re-encrypt it to get tamper and truncation protection)";
         }
 
@@ -511,6 +517,140 @@ void DecryptFolder(const std::vector<uint8_t>& secret, const fs::path& archive,
         job.SetResult(true, "Folder restored successfully.", out_folder.string());
     } catch (const std::exception& e) {
         job.SetResult(false, std::string("Folder decryption failed: ") + e.what());
+    }
+}
+
+// ---- inspect / verify -----------------------------------------------------
+
+FileInfo InspectFile(const fs::path& path) {
+    FileInfo info;
+    std::error_code ec;
+    info.file_size = fs::file_size(path, ec);
+    if (ec) { info.summary = "Could not read the file: " + ec.message(); return info; }
+    std::ifstream fin(path, std::ios::binary);
+    if (!fin) { info.summary = "Could not open the file."; return info; }
+    info.readable = true;
+
+    uint8_t header[kHeaderLen];
+    fin.read(reinterpret_cast<char*>(header), kHeaderLen);
+    size_t got = (size_t)fin.gcount();
+
+    std::string problem;
+    if (got >= 5 && std::memcmp(header, kMagic, 4) == 0) {
+        if (header[4] != kFormatVersion) {
+            info.summary = "SecureVault file, but format version " + std::to_string((int)header[4]) +
+                           " is not supported by this build.";
+            return info;
+        }
+        info.version = 2;
+        if (got < kHeaderLen) { info.summary = "Format v2, but the header is cut short."; return info; }
+        info.chunk_size = GetU32(header + 5);
+        if (info.chunk_size == 0 || info.chunk_size > kMaxChunkSize) {
+            info.summary = "Format v2, but the header is corrupted (bad chunk size).";
+            return info;
+        }
+        const uint64_t max_ct = (uint64_t)info.chunk_size + kTagLen;
+        uint64_t pos = kHeaderLen;
+        bool saw_final = false;
+        while (pos < info.file_size) {
+            if (saw_final) { problem = "extra data after the final chunk"; break; }
+            if (pos + 4 > info.file_size) { problem = "a chunk header is cut short"; break; }
+            fin.clear();
+            fin.seekg((std::streamoff)pos);
+            uint8_t word[4];
+            fin.read(reinterpret_cast<char*>(word), 4);
+            uint32_t w = GetU32(word);
+            bool fin_flag = (w & 0x80000000u) != 0;
+            uint64_t ct_len = w & 0x7FFFFFFFu;
+            if (ct_len < kTagLen || ct_len > max_ct) { problem = "a chunk has an invalid length"; break; }
+            if (!fin_flag && ct_len != max_ct) { problem = "a non-final chunk is the wrong size"; break; }
+            if (pos + 4 + ct_len > info.file_size) { problem = "the last chunk is cut short"; break; }
+            pos += 4 + ct_len;
+            info.chunks++;
+            saw_final = fin_flag;
+        }
+        if (problem.empty() && !saw_final) problem = "the final chunk is missing (file is truncated)";
+        info.structure_ok = problem.empty();
+        info.summary = "Format: SecureVault v2 (authenticated chunks)\n"
+                       "Size: " + std::to_string(info.file_size) + " bytes\n"
+                       "Chunks: " + std::to_string(info.chunks) + " (up to " +
+                       std::to_string(info.chunk_size) + " bytes each)\n"
+                       "Structure: " + (info.structure_ok ? std::string("complete, with a final chunk")
+                                                           : "PROBLEM - " + problem) + "\n" +
+                       (info.structure_ok
+                            ? "Use Verify with the password or key file to check the contents are genuine."
+                            : "This file will not decrypt.");
+        return info;
+    }
+
+    // Not v2: see whether it parses as a legacy v1 file (salt, then length-prefixed chunks).
+    info.version = 1;
+    if (info.file_size < kSaltLen + 4) {
+        info.version = 0;
+        info.summary = "Not a SecureVault file (too short).";
+        return info;
+    }
+    uint64_t pos = kSaltLen;
+    while (pos < info.file_size) {
+        if (pos + 4 > info.file_size) { problem = "a chunk header is cut short"; break; }
+        fin.clear();
+        fin.seekg((std::streamoff)pos);
+        uint8_t lenbuf[4];
+        fin.read(reinterpret_cast<char*>(lenbuf), 4);
+        uint32_t plen = GetU32(lenbuf);
+        if (plen < kNonceLen + kTagLen || plen > (1u << 20)) { problem = "a chunk has an invalid length"; break; }
+        if (pos + 4 + plen > info.file_size) { problem = "the last chunk is cut short"; break; }
+        pos += 4 + plen;
+        info.chunks++;
+    }
+    if (!problem.empty() || info.chunks == 0) {
+        info.version = 0;
+        info.summary = "Not a recognisable SecureVault file" +
+                       (problem.empty() ? std::string(".") : " (" + problem + ").");
+        return info;
+    }
+    info.structure_ok = true;
+    info.summary = "Format: legacy v1 (from SecureVault 1.0)\n"
+                   "Size: " + std::to_string(info.file_size) + " bytes\n"
+                   "Chunks: " + std::to_string(info.chunks) + "\n"
+                   "Legacy files cannot detect truncation or reordering. Decrypt and re-encrypt\n"
+                   "the file to upgrade it to v2.";
+    return info;
+}
+
+void VerifyFile(const std::vector<uint8_t>& secret, const fs::path& path, VaultJob& job) {
+    std::error_code ec;
+    uint64_t total_size = fs::file_size(path, ec);
+    if (ec) { job.SetResult(false, "Could not read the file: " + ec.message()); return; }
+    std::ifstream fin(path, std::ios::binary);
+    if (!fin) { job.SetResult(false, "Could not open the file."); return; }
+
+    try {
+        uint8_t header[kHeaderLen];
+        fin.read(reinterpret_cast<char*>(header), kHeaderLen);
+        size_t got = (size_t)fin.gcount();
+
+        uint64_t bytes = 0;
+        Sink count = [&bytes](const uint8_t*, size_t n) { bytes += n; };
+        std::string kind;
+        if (got >= 5 && std::memcmp(header, kMagic, 4) == 0) {
+            if (header[4] != kFormatVersion)
+                throw std::runtime_error("Unsupported file format version " +
+                                          std::to_string((int)header[4]) + ".");
+            if (got < kHeaderLen) throw std::runtime_error("Corrupted file header.");
+            DecryptStreamV2(secret, fin, header, total_size, count, job);
+            kind = "v2";
+        } else {
+            fin.clear();
+            fin.seekg(0);
+            DecryptStreamV1(secret, fin, total_size, count, job);
+            kind = "legacy v1 - no protection against truncation or reordering";
+        }
+        job.progress = 1.0f;
+        job.SetResult(true, "Verified: every chunk authenticates (" + kind + "). The file holds " +
+                                std::to_string(bytes) + " bytes of data.");
+    } catch (const std::exception& e) {
+        job.SetResult(false, std::string("Verification failed: ") + e.what());
     }
 }
 

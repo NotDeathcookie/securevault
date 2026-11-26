@@ -15,6 +15,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <filesystem>
 #include <mutex>
 #include <string>
@@ -80,6 +81,23 @@ void EncryptFolder(const std::vector<uint8_t>& secret, const fs::path& folder,
                     const fs::path& out, VaultJob& job);
 void DecryptFolder(const std::vector<uint8_t>& secret, const fs::path& archive,
                     const fs::path& out_folder, VaultJob& job);
+
+// What can be learned about an encrypted file WITHOUT the password: its format
+// and whether its structure is complete. Cannot tell if the data is genuine.
+struct FileInfo {
+    bool readable = false;      // file could be opened and recognised
+    int version = 0;            // 2 = current format, 1 = legacy, 0 = unknown
+    uint64_t file_size = 0;
+    uint64_t chunks = 0;
+    uint32_t chunk_size = 0;    // v2 only
+    bool structure_ok = false;  // every length is sane, exactly one final chunk, no trailing bytes
+    std::string summary;        // human readable report
+};
+FileInfo InspectFile(const fs::path& path);
+
+// Decrypts the whole file in memory-sized pieces and checks every chunk's
+// authentication tag, without writing anything. Result goes to job.SetResult().
+void VerifyFile(const std::vector<uint8_t>& secret, const fs::path& path, VaultJob& job);
 
 std::string HashFile(const fs::path& path, HashAlgo algo, VaultJob& job);
 

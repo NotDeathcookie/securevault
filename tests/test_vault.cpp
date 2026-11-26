@@ -1,14 +1,18 @@
 // Tests for the SecureVault crypto and container format.
 // Build with -DSECUREVAULT_BUILD_TESTS=ON, run the vault_tests binary.
 // Exits non-zero on any failure.
+#include "generator.hpp"
 #include "pathutil.hpp"
+#include "wordlist.hpp"
 #include "vault.hpp"
 
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <algorithm>
 #include <random>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -147,9 +151,8 @@ static void TestTamperingAndTruncation() {
     CHECK(Dec(kSecret, enc, dec) && ReadAll(dec) == data, "unmodified file still decrypts");
 }
 
-static void TestLegacyV1() {
-    // Build a v1 file by hand: salt | [u32 len][nonce | ct+tag]...
-    Bytes data = RandomData(70000, 5);
+static Bytes MakeLegacyV1(const Bytes& data) {
+    // salt | [u32 len][nonce | ct+tag]...  (the SecureVault 1.0 layout)
     Bytes salt = RandomBytes(kSaltLen);
     auto key = DeriveKey(kSecret, salt.data(), salt.size());
     Bytes file(salt.begin(), salt.end());
@@ -163,8 +166,13 @@ static void TestLegacyV1() {
         file.insert(file.end(), nonce.begin(), nonce.end());
         file.insert(file.end(), ct.begin(), ct.end());
     }
+    return file;
+}
+
+static void TestLegacyV1() {
+    Bytes data = RandomData(70000, 5);
     fs::path enc = g_dir / "v1.enc", dec = g_dir / "v1.dec";
-    WriteAll(enc, file);
+    WriteAll(enc, MakeLegacyV1(data));
     CHECK(Dec(kSecret, enc, dec), "legacy v1 file decrypts");
     CHECK(ReadAll(dec) == data, "legacy v1 data matches");
 }
@@ -229,12 +237,137 @@ static void TestPathCleaning() {
     CHECK(std::string(typing) == "C:\\a ", "in-place strip keeps trailing space while typing");
 }
 
+static void TestOutputNames() {
+    using pathutil::FileOutputPath; using pathutil::FolderOutputPath;
+    CHECK(FileOutputPath("a.txt", true) == "a.txt.enc", "file encrypt name");
+    CHECK(FileOutputPath("a.txt.enc", false) == "a.txt", "file decrypt name strips .enc");
+    CHECK(FileOutputPath("a.bin", false) == "a.bin.decrypted", "file decrypt name without .enc");
+    CHECK(FolderOutputPath("C:\\x\\dir\\", true) == "C:\\x\\dir_folder.enc", "folder encrypt name");
+    CHECK(FolderOutputPath("dir_folder.enc", false) == "dir_restored", "folder decrypt name");
+    CHECK(FolderOutputPath("x.enc", false) == "x_restored", "folder decrypt name from plain .enc");
+    CHECK(FolderOutputPath("foo", false) == "foo_restored", "folder decrypt name without .enc");
+}
+
+static void TestGenerators() {
+    using namespace generator;
+    PasswordOptions o;
+    bool allGood = true;
+    for (int i = 0; i < 60; i++) {
+        std::string pw = GeneratePassword(o);
+        bool lo = false, up = false, di = false, sy = false;
+        for (char c : pw) {
+            if (c >= 'a' && c <= 'z') lo = true;
+            else if (c >= 'A' && c <= 'Z') up = true;
+            else if (c >= '0' && c <= '9') di = true;
+            else sy = true;
+        }
+        if (pw.size() != 20 || !lo || !up || !di || !sy) allGood = false;
+    }
+    CHECK(allGood, "passwords: right length and contain every selected class");
+
+    PasswordOptions digitsOnly; digitsOnly.lower = digitsOnly.upper = digitsOnly.symbols = false;
+    digitsOnly.length = 12;
+    std::string d = GeneratePassword(digitsOnly);
+    CHECK(d.size() == 12 && d.find_first_not_of("0123456789") == std::string::npos, "digits-only password");
+
+    PasswordOptions none; none.lower = none.upper = none.digits = none.symbols = false;
+    bool threw = false;
+    try { GeneratePassword(none); } catch (...) { threw = true; }
+    CHECK(threw, "password with no character types is rejected");
+
+    PasswordOptions tiny; tiny.length = 1;
+    CHECK(GeneratePassword(tiny).size() == (size_t)kMinPasswordLength, "password length is clamped up");
+    CHECK(GeneratePassword(o) != GeneratePassword(o), "two passwords differ");
+
+    std::set<std::string> list(kWords, kWords + kWordCount);
+    CHECK(list.size() == 2048, "word list has 2048 distinct words");
+    std::string phrase = GeneratePassphrase(6);
+    size_t seps = (size_t)std::count(phrase.begin(), phrase.end(), '-');
+    CHECK(seps == 5, "passphrase has six words");
+    bool inList = true;
+    size_t start = 0;
+    while (start <= phrase.size()) {
+        size_t end = phrase.find('-', start);
+        if (end == std::string::npos) end = phrase.size();
+        if (!list.count(phrase.substr(start, end - start))) inList = false;
+        start = end + 1;
+    }
+    CHECK(inList, "every passphrase word comes from the list");
+    CHECK(PassphraseBits(6) > 65.9 && PassphraseBits(6) < 66.1, "6 words is 66 bits");
+
+    int counts[7] = {0};
+    for (int i = 0; i < 7000; i++) counts[RandomBelow(7)]++;
+    bool even = true;
+    for (int c : counts) if (c < 750 || c > 1250) even = false;
+    CHECK(even, "RandomBelow is roughly uniform");
+
+    fs::path k1 = g_dir / "a.key", k2 = g_dir / "b.key";
+    std::string err;
+    CHECK(WriteKeyFile(k1, kKeyFileBytes, err), "key file written");
+    CHECK(WriteKeyFile(k2, kKeyFileBytes, err), "second key file written");
+    Bytes b1 = ReadAll(k1), b2 = ReadAll(k2);
+    CHECK(b1.size() == kKeyFileBytes && b1 != b2, "key files are 64 bytes and differ");
+    std::string enc = EncryptText(b1, "secret via key file");
+    CHECK(DecryptText(b1, enc) == "secret via key file", "key file works as a secret");
+    bool wrongKey = false;
+    try { DecryptText(b2, enc); } catch (...) { wrongKey = true; }
+    CHECK(wrongKey, "a different key file does not decrypt");
+    CHECK(!WriteKeyFile(g_dir / "no_such_dir" / "x.key", kKeyFileBytes, err) && !err.empty(),
+          "key file in a missing folder fails with a message");
+}
+
+static void TestInspectAndVerify() {
+    fs::path in = g_dir / "iv.bin", enc = g_dir / "iv.enc", mod = g_dir / "iv.mod";
+    Bytes data = RandomData(200000, 3);  // 4 chunks
+    WriteAll(in, data);
+    CHECK(Enc(kSecret, in, enc), "encrypt for inspect tests");
+
+    FileInfo info = InspectFile(enc);
+    CHECK(info.version == 2 && info.chunks == 4 && info.structure_ok && info.chunk_size == 65536,
+          "inspect: v2, 4 chunks, structure ok");
+
+    Bytes good = ReadAll(enc);
+    auto spans = Chunks(good);
+    { Bytes b(good.begin(), good.begin() + spans[3].off); WriteAll(mod, b);
+      FileInfo t = InspectFile(mod);
+      CHECK(t.version == 2 && !t.structure_ok, "inspect: truncated file is flagged"); }
+    { Bytes b = good; b.push_back(0); WriteAll(mod, b);
+      CHECK(!InspectFile(mod).structure_ok, "inspect: trailing byte is flagged"); }
+
+    WriteAll(mod, MakeLegacyV1(RandomData(70000, 8)));
+    FileInfo legacy = InspectFile(mod);
+    CHECK(legacy.version == 1 && legacy.chunks == 2 && legacy.structure_ok, "inspect: legacy v1 recognised");
+
+    WriteAll(mod, RandomData(300, 77));
+    CHECK(InspectFile(mod).version == 0, "inspect: random data is not a SecureVault file");
+    WriteAll(mod, Bytes());
+    CHECK(InspectFile(mod).version == 0, "inspect: empty file is not a SecureVault file");
+    CHECK(!InspectFile(g_dir / "missing.enc").readable, "inspect: missing file");
+
+    VaultJob ok; VerifyFile(kSecret, enc, ok);
+    CHECK(ok.ok.load(), "verify: good file passes");
+    VaultJob wrong; VerifyFile(kWrong, enc, wrong);
+    CHECK(!wrong.ok.load(), "verify: wrong password fails");
+    { Bytes b = good; b[spans[2].off + 50] ^= 1; WriteAll(mod, b);
+      VaultJob j; VerifyFile(kSecret, mod, j);
+      CHECK(!j.ok.load(), "verify: tampered file fails"); }
+    { Bytes b(good.begin(), good.begin() + spans[3].off); WriteAll(mod, b);
+      VaultJob j; VerifyFile(kSecret, mod, j);
+      CHECK(!j.ok.load(), "verify: truncated file fails"); }
+    WriteAll(mod, MakeLegacyV1(RandomData(70000, 8)));
+    VaultJob lj; VerifyFile(kSecret, mod, lj);
+    CHECK(lj.ok.load(), "verify: legacy v1 file passes");
+}
+
 int main() {
     std::random_device rd;
     g_dir = fs::temp_directory_path() / ("svtests_" + std::to_string(rd()));
     fs::create_directories(g_dir);
 
     TestPathCleaning();
+    TestOutputNames();
+    TestGenerators();
+    TestInspectAndVerify();
     TestTextAndWrongPassword();
     TestRoundTripSizes();
     TestWrongPasswordFile();

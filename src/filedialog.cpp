@@ -28,7 +28,47 @@ static std::string ToUtf8(const wchar_t* w) {
     return s;
 }
 
+static bool SaveDialog(std::string& out) {
+    HRESULT hrInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    bool needUninit = SUCCEEDED(hrInit);
+    bool picked = false;
+
+    IFileSaveDialog* dlg = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                    IID_IFileSaveDialog, reinterpret_cast<void**>(&dlg)))) {
+        DWORD opts = 0;
+        dlg->GetOptions(&opts);
+        dlg->SetOptions(opts | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_OVERWRITEPROMPT);
+        dlg->SetTitle(L"Save the new key file");
+        dlg->SetFileName(L"securevault.key");
+        dlg->SetDefaultExtension(L"key");
+        COMDLG_FILTERSPEC filters[] = {
+            {L"Key files (*.key)", L"*.key"},
+            {L"All files", L"*.*"},
+        };
+        dlg->SetFileTypes(2, filters);
+        dlg->SetFileTypeIndex(1);
+
+        if (SUCCEEDED(dlg->Show(g_owner))) {
+            IShellItem* item = nullptr;
+            if (SUCCEEDED(dlg->GetResult(&item))) {
+                PWSTR path = nullptr;
+                if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))) {
+                    out = ToUtf8(path);
+                    picked = !out.empty();
+                    CoTaskMemFree(path);
+                }
+                item->Release();
+            }
+        }
+        dlg->Release();
+    }
+    if (needUninit) CoUninitialize();
+    return picked;
+}
+
 bool Browse(Kind kind, std::string& out) {
+    if (kind == Kind::SaveFile) return SaveDialog(out);
     HRESULT hrInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     bool needUninit = SUCCEEDED(hrInit);  // S_OK and S_FALSE both need a matching call
     bool picked = false;
@@ -82,9 +122,11 @@ namespace filedialog {
 void SetOwner(GLFWwindow*) {}
 
 bool Browse(Kind kind, std::string& out) {
-    const char* cmd = (kind == Kind::PickFolder)
-                          ? "zenity --file-selection --directory 2>/dev/null"
-                          : "zenity --file-selection 2>/dev/null";
+    const char* cmd =
+        kind == Kind::PickFolder ? "zenity --file-selection --directory 2>/dev/null"
+        : kind == Kind::SaveFile ? "zenity --file-selection --save --confirm-overwrite "
+                                   "--filename=securevault.key 2>/dev/null"
+                                 : "zenity --file-selection 2>/dev/null";
     FILE* p = popen(cmd, "r");
     if (!p) return false;
     char buf[4096];

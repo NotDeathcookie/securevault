@@ -32,7 +32,16 @@ This document says what that protects against and what it doesn't.
 - **Password recovery.** There is none. Lose the password or key file and the
   data is gone.
 - **Memory hygiene.** Keys and passwords are not locked in memory or reliably
-  wiped after use.
+  wiped after use. Auto-lock clears the on-screen password and text, but copies
+  may remain in memory, the pagefile, or crash dumps.
+- **Clipboard.** A copied generated password is cleared after 30 seconds only if
+  the clipboard still holds it. Clipboard history tools (such as Win+V) may keep
+  their own copy.
+- **Key files.** A key file is only as secret as the file. Anyone who has a copy
+  can decrypt. Losing it loses the data.
+- **Command line.** Passwords are accepted only from a hidden prompt, an
+  environment variable, standard input, or a key file, never as an argument.
+  Environment variables are visible to other processes running as the same user.
 
 ## Not audited
 

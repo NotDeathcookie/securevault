@@ -17,14 +17,19 @@ An open-source desktop app for encrypting text, files, and folders, with secure 
 - **Private mode**: masks the password field and hides the activity log
 - **Browse buttons** open the normal Windows file or folder picker, and paths pasted with quotes (Windows "Copy as path") work as they are
 - **Tamper detection**: removed, reordered, duplicated, or appended chunks are rejected, not just flipped bits
+- **Password and passphrase generator**: random passwords (choose length and character types) or passphrases from a 2048-word list, with an entropy estimate; a copied password is cleared from the clipboard after 30 seconds
+- **Key file generator**: creates a random 64-byte key file and selects it for you
+- **Inspect and verify**: see an encrypted file's format and whether it is complete without a password, or check every chunk with one
+- **Auto-lock**: clears the password and any text on screen after a chosen idle time (off, 1, 5, 15, or 30 minutes)
+- **Command line**: `securevault-cli` does all of this from a terminal, for scripts and automation
 - Large files are processed in 64 KB chunks on a background thread, with a live progress bar
 
 ## Download
 
 Grab the latest build from the [Releases](../../releases) page.
 
-- **Windows:** download `securevault.exe` and run it. No installer and nothing else to install.
-- **Linux:** extract the archive, run `chmod +x securevault`, then run it. Requires GLFW and OpenSSL (`libglfw3`, `libssl3`).
+- **Windows:** download the Windows zip, extract it, and run `securevault.exe` (keep `glfw3.dll` next to it). `securevault-cli.exe` is the command-line version. No installer.
+- **Linux:** extract the archive, run `chmod +x securevault securevault-cli`, then run them. Requires GLFW and OpenSSL (`libglfw3`, `libssl3`).
 
 ## Using it
 
@@ -44,6 +49,24 @@ Output naming:
 | Encrypt text | base64 text shown in the Result box |
 
 The original is never deleted automatically. Use the **Tools** tab to shred it once you've confirmed the encrypted copy works.
+
+The **Tools** tab also has **Inspect / Verify** for encrypted files, and the **Generate** tab makes passwords, passphrases, and key files.
+
+## Command line
+
+```
+securevault-cli encrypt  report.pdf                  # asks for a password (hidden input, asked twice)
+securevault-cli decrypt  report.pdf.enc
+securevault-cli encrypt  photos --keyfile my.key     # a folder, with a key file
+securevault-cli verify   report.pdf.enc
+securevault-cli inspect  report.pdf.enc              # format and completeness, no password needed
+securevault-cli hash     report.pdf --algo sha512
+securevault-cli shred    old-notes.txt --passes 3
+securevault-cli genkey   my.key
+securevault-cli genpass  --length 24                 # or: --words 6
+```
+
+Passwords are never accepted as command-line arguments, because they would end up in your shell history and the process list. Use the prompt, `--keyfile FILE`, `--password-env NAME`, or `--password-stdin`. Existing outputs are never overwritten unless you pass `--force`. Exit codes: 0 success, 1 failed, 2 usage error.
 
 ## Building from source
 
@@ -87,6 +110,9 @@ src/
   vault_crypto_win.cpp      Windows backend (CNG / bcrypt)
   pathutil.hpp              path clean-up (quotes, UTF-8)
   filedialog.hpp / .cpp     native file and folder picker
+  generator.hpp / .cpp      password, passphrase, and key file generation
+  wordlist.hpp              the 2048-word passphrase list
+  cli.cpp                   the securevault-cli command line tool
 tests/                      crypto and file format tests
 THREAT_MODEL.md             what it protects against, and the file format
 third_party/imgui/          Dear ImGui
@@ -112,4 +138,4 @@ Issues and pull requests are welcome.
 
 ## License
 
-MIT. See [LICENSE](LICENSE). Dear ImGui is bundled under its own MIT license (`third_party/imgui/LICENSE.txt`).
+MIT. See [LICENSE](LICENSE). Dear ImGui is bundled under its own MIT license (`third_party/imgui/LICENSE.txt`). The passphrase word list is the English list from [BIP-39](https://github.com/bitcoin/bips/blob/master/bip-0039/english.txt).

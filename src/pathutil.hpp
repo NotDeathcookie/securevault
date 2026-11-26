@@ -51,6 +51,29 @@ inline void StripQuotesInPlace(char* buf, size_t cap) {
     if (StripOnePair(s)) std::snprintf(buf, cap, "%s", s.c_str());
 }
 
+inline bool EndsWith(const std::string& s, const std::string& suffix) {
+    return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+// Default output names, shared by the GUI and the command line.
+//   file:    report.pdf -> report.pdf.enc   and   report.pdf.enc -> report.pdf
+//   folder:  photos     -> photos_folder.enc  and  photos_folder.enc -> photos_restored
+inline std::string FileOutputPath(const std::string& in, bool encrypt) {
+    if (encrypt) return in + ".enc";
+    return EndsWith(in, ".enc") ? in.substr(0, in.size() - 4) : in + ".decrypted";
+}
+
+inline std::string FolderOutputPath(const std::string& in, bool encrypt) {
+    if (encrypt) {
+        std::string clean = in;
+        while (!clean.empty() && (clean.back() == '/' || clean.back() == '\\')) clean.pop_back();
+        return clean + "_folder.enc";
+    }
+    if (EndsWith(in, "_folder.enc")) return in.substr(0, in.size() - 11) + "_restored";
+    if (EndsWith(in, ".enc")) return in.substr(0, in.size() - 4) + "_restored";
+    return in + "_restored";
+}
+
 // The UI works in UTF-8; on Windows std::filesystem needs to be told that.
 inline std::filesystem::path ToPath(const std::string& utf8) {
 #if defined(_WIN32)

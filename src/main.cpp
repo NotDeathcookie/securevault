@@ -14,6 +14,7 @@
 #include "theme.hpp"
 #include "pathutil.hpp"
 #include "filedialog.hpp"
+#include "generator.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -35,9 +36,14 @@ struct LogLine {
     bool ok;
 };
 
+// Which part of the UI started the running job, so its result lands in the right place.
+enum class Target { Home, Hash, Shred, Verify };
+
+constexpr int kAutoLockMinutes[] = {0, 1, 5, 15, 30};  // 0 = off
+
 struct AppState {
     // Navigation
-    int activeTab = 0;  // 0 = Home, 1 = Log, 2 = Tools
+    int activeTab = 0;  // 0 = Home, 1 = Log, 2 = Tools, 3 = Generate
     bool privateMode = false;  // masks the password field + log contents
 
     // Operation selection (Home tab)
@@ -58,8 +64,34 @@ struct AppState {
     char hashResult[256] = "";
 
     char shredPath[1024] = "";
+    std::string shredStatus;
+    bool shredOk = true;
     int shredPasses = 2;
     bool shredConfirmed = false;
+
+    // Inspect / verify (Tools tab)
+    char inspectPath[1024] = "";
+    std::string inspectSummary;
+    std::string verifyLine;
+    bool verifyOk = true;
+
+    // Generate tab
+    int genMode = 0;  // 0 = password, 1 = passphrase
+    generator::PasswordOptions genOpts;
+    int genWords = 6;
+    char genOutput[512] = "";
+    std::string genNote;
+    std::string keyfileMessage;
+    bool keyfileOk = true;
+    bool pendingKeyfile = false;
+
+    // Clipboard auto-clear and idle auto-lock
+    std::string clipboardCopied;
+    double clipboardClearAt = 0.0;
+    int autoLockIdx = 2;  // 5 minutes
+    double lastActivity = 0.0;
+
+    Target jobTarget = Target::Home;
 
     // Job + stats
     vault::VaultJob job;
@@ -102,6 +134,12 @@ void AddLog(AppState& app, const std::string& text, bool ok) {
     if (app.logLines.size() > 200) app.logLines.erase(app.logLines.begin());
 }
 
+// Overwrites a buffer in a way the compiler cannot optimise away.
+void Wipe(void* p, size_t n) {
+    volatile unsigned char* v = static_cast<volatile unsigned char*>(p);
+    while (n--) *v++ = 0;
+}
+
 std::vector<uint8_t> GetSecret(AppState& app) {
     if (app.useKeyfile) {
         std::ifstream f(pathutil::ToPath(pathutil::CleanPath(app.keyfilePath)), std::ios::binary);
@@ -122,6 +160,7 @@ void StartOperation(AppState& app) {
     app.job.done = false;
     app.job.progress = 0.0f;
     app.jobConsumed = false;
+    app.jobTarget = Target::Home;
     app.resultBuffer[0] = '\0';
 
     if (app.worker.joinable()) app.worker.join();
@@ -148,10 +187,7 @@ void StartOperation(AppState& app) {
         } else if (mode == Mode::File) {
             std::string inPath = pathutil::CleanPath(app.path);
             if (inPath.empty()) throw std::runtime_error("Enter a file path first.");
-            std::string outPath = enc ? inPath + ".enc"
-                                       : (inPath.size() > 4 && inPath.substr(inPath.size() - 4) == ".enc"
-                                              ? inPath.substr(0, inPath.size() - 4)
-                                              : inPath + ".decrypted");
+            std::string outPath = pathutil::FileOutputPath(inPath, enc);
             app.worker = std::thread([&app, secret, inPath, outPath, enc]() {
                 using pathutil::ToPath;
                 if (enc) vault::EncryptFile(secret, ToPath(inPath), ToPath(outPath), app.job);
@@ -160,20 +196,7 @@ void StartOperation(AppState& app) {
         } else {  // Folder
             std::string inPath = pathutil::CleanPath(app.path);
             if (inPath.empty()) throw std::runtime_error("Enter a folder path first.");
-            std::string outPath;
-            if (enc) {
-                std::string clean = inPath;
-                while (!clean.empty() && (clean.back() == '/' || clean.back() == '\\'))
-                    clean.pop_back();
-                outPath = clean + "_folder.enc";
-            } else {
-                if (inPath.size() > 11 && inPath.substr(inPath.size() - 11) == "_folder.enc")
-                    outPath = inPath.substr(0, inPath.size() - 11) + "_restored";
-                else if (inPath.size() > 4 && inPath.substr(inPath.size() - 4) == ".enc")
-                    outPath = inPath.substr(0, inPath.size() - 4) + "_restored";
-                else
-                    outPath = inPath + "_restored";
-            }
+            std::string outPath = pathutil::FolderOutputPath(inPath, enc);
             app.worker = std::thread([&app, secret, inPath, outPath, enc]() {
                 using pathutil::ToPath;
                 if (enc) vault::EncryptFolder(secret, ToPath(inPath), ToPath(outPath), app.job);
@@ -191,6 +214,7 @@ void StartHash(AppState& app) {
     app.job.done = false;
     app.job.progress = 0.0f;
     app.jobConsumed = false;
+    app.jobTarget = Target::Hash;
     app.hashResult[0] = '\0';
     if (app.worker.joinable()) app.worker.join();
 
@@ -208,6 +232,8 @@ void StartShred(AppState& app) {
     app.job.done = false;
     app.job.progress = 0.0f;
     app.jobConsumed = false;
+    app.jobTarget = Target::Shred;
+    app.shredStatus.clear();
     if (app.worker.joinable()) app.worker.join();
 
     std::string p = pathutil::CleanPath(app.shredPath);
@@ -218,26 +244,83 @@ void StartShred(AppState& app) {
     });
 }
 
+void StartVerify(AppState& app) {
+    if (JobBusy(app)) return;
+    app.job.running = true;
+    app.job.done = false;
+    app.job.progress = 0.0f;
+    app.jobConsumed = false;
+    app.jobTarget = Target::Verify;
+    app.verifyLine.clear();
+    if (app.worker.joinable()) app.worker.join();
+
+    std::string p = pathutil::CleanPath(app.inspectPath);
+    if (p.empty()) { app.job.SetResult(false, "Enter a file path first."); return; }
+    try {
+        std::vector<uint8_t> secret = GetSecret(app);
+        app.worker = std::thread([&app, secret, p]() {
+            vault::VerifyFile(secret, pathutil::ToPath(p), app.job);
+        });
+    } catch (const std::exception& e) {
+        app.job.SetResult(false, e.what());
+    }
+}
+
 // Pulls a finished job's result into the right place in app state + log/stats.
-void PollJob(AppState& app, const char* opLabel) {
+void PollJob(AppState& app) {
     if (app.job.done.load() && !app.jobConsumed) {
         std::lock_guard<std::mutex> lk(app.job.result_mutex);
         app.jobConsumed = true;
         app.attempts++;
         if (app.job.ok) app.successes++; else app.failures++;
 
-        AddLog(app, std::string(opLabel) + ": " + app.job.result_text, app.job.ok);
+        const char* label = "Operation";
+        switch (app.jobTarget) {
+            case Target::Home:   label = "Operation"; break;
+            case Target::Hash:   label = "Hash"; break;
+            case Target::Shred:  label = "Shred"; break;
+            case Target::Verify: label = "Verify"; break;
+        }
+        AddLog(app, std::string(label) + ": " + app.job.result_text, app.job.ok);
 
-        if (app.activeTab == 2 && opLabel == std::string("Hash")) {
-            std::snprintf(app.hashResult, sizeof(app.hashResult), "%s", app.job.result_text.c_str());
-        } else {
-            std::snprintf(app.resultBuffer, sizeof(app.resultBuffer), "%s", app.job.result_text.c_str());
+        switch (app.jobTarget) {
+            case Target::Home:
+                std::snprintf(app.resultBuffer, sizeof(app.resultBuffer), "%s", app.job.result_text.c_str());
+                break;
+            case Target::Hash:
+                std::snprintf(app.hashResult, sizeof(app.hashResult), "%s", app.job.result_text.c_str());
+                break;
+            case Target::Shred:
+                app.shredStatus = app.job.result_text;
+                app.shredOk = app.job.ok;
+                break;
+            case Target::Verify:
+                app.verifyLine = app.job.result_text;
+                app.verifyOk = app.job.ok;
+                break;
         }
     }
     app.progressHistory.push_back(app.job.running ? app.job.progress.load()
                                                     : (app.progressHistory.empty() ? 0.0f
                                                                                    : app.progressHistory.back()));
     if (app.progressHistory.size() > 120) app.progressHistory.pop_front();
+}
+
+// Clears the password and any plaintext on screen after a period with no input.
+void UpdateAutoLock(AppState& app, double now, bool activity) {
+    if (activity || JobBusy(app)) { app.lastActivity = now; return; }
+    int minutes = kAutoLockMinutes[app.autoLockIdx];
+    if (minutes == 0 || now - app.lastActivity < minutes * 60.0) return;
+
+    bool hadSecrets = app.password[0] || app.message[0] || app.resultBuffer[0] || app.genOutput[0];
+    Wipe(app.password, sizeof(app.password));
+    Wipe(app.message, sizeof(app.message));
+    Wipe(app.resultBuffer, sizeof(app.resultBuffer));
+    Wipe(app.genOutput, sizeof(app.genOutput));
+    if (!app.clipboardCopied.empty()) app.clipboardClearAt = 0.0;  // clear the clipboard right away
+    app.lastActivity = now;
+    if (hadSecrets)
+        AddLog(app, "Auto-locked after " + std::to_string(minutes) + " min idle: password and text cleared.", true);
 }
 
 // ---------------------------------------------------------------------
@@ -359,11 +442,60 @@ int main() {
             app.browseTarget = nullptr;
         }
 
+        if (app.pendingKeyfile) {
+            app.pendingKeyfile = false;
+            std::string picked;
+            if (filedialog::Browse(filedialog::Kind::SaveFile, picked)) {
+                picked = pathutil::CleanPath(picked);
+                std::string err;
+                if (generator::WriteKeyFile(pathutil::ToPath(picked), generator::kKeyFileBytes, err)) {
+                    std::snprintf(app.keyfilePath, sizeof(app.keyfilePath), "%s", picked.c_str());
+                    app.useKeyfile = true;
+                    app.keyfileOk = true;
+                    app.keyfileMessage = "Created and selected on the Home tab: " + picked;
+                    AddLog(app, "Created key file " + picked, true);
+                } else {
+                    app.keyfileOk = false;
+                    app.keyfileMessage = "Could not create the key file: " + err;
+                }
+            }
+        }
+
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
-        PollJob(app, app.activeTab == 2 ? "Hash/Shred" : "Operation");
+        {
+            const double now = glfwGetTime();
+
+            // Clear the clipboard 30 seconds after a generated password was copied,
+            // but only if it still holds that password (don't wipe something newer).
+            if (!app.clipboardCopied.empty() && now >= app.clipboardClearAt) {
+                const char* cur = ImGui::GetClipboardText();
+                if (cur && app.clipboardCopied == cur) ImGui::SetClipboardText("");
+                app.clipboardCopied.clear();
+            }
+
+            bool activity = io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f || io.MouseWheel != 0.0f ||
+                            io.InputQueueCharacters.Size > 0 ||
+                            ImGui::IsMouseClicked(ImGuiMouseButton_Left) ||
+                            ImGui::IsMouseClicked(ImGuiMouseButton_Right) ||
+                            ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_Backspace) ||
+                            ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_Tab) ||
+                            ImGui::IsKeyPressed(ImGuiKey_LeftArrow) || ImGui::IsKeyPressed(ImGuiKey_RightArrow) ||
+                            ImGui::IsKeyPressed(ImGuiKey_UpArrow) || ImGui::IsKeyPressed(ImGuiKey_DownArrow);
+            UpdateAutoLock(app, now, activity);
+        }
+
+        // F9 toggles the window's title bar and border (handy for clean screenshots).
+        // F9 rather than F10, because Windows treats F10 as a menu key.
+        if (ImGui::IsKeyPressed(ImGuiKey_F9, false)) {
+            static bool decorated = true;
+            decorated = !decorated;
+            glfwSetWindowAttrib(window, GLFW_DECORATED, decorated ? GLFW_TRUE : GLFW_FALSE);
+        }
+
+        PollJob(app);
 
         ImGuiViewport* vp = ImGui::GetMainViewport();
         ImGui::SetNextWindowPos(vp->WorkPos);
@@ -392,19 +524,29 @@ int main() {
             ImGui::SetWindowFontScale(1.0f);
 
             ImGui::SameLine(0, 40);
-            const char* tabs[] = {"Home", "Log", "Tools"};
-            for (int i = 0; i < 3; i++) {
+            const char* tabs[] = {"Home", "Log", "Tools", "Generate"};
+            for (int i = 0; i < 4; i++) {
                 ImGui::PushID(i);
                 if (app.activeTab == i) ImGui::PushStyleColor(ImGuiCol_Text, theme::kPink);
                 else ImGui::PushStyleColor(ImGuiCol_Text, theme::kTextDim);
-                if (ImGui::Button(tabs[i], ImVec2(70, 28))) app.activeTab = i;
+                if (ImGui::Button(tabs[i], ImVec2(82, 28))) app.activeTab = i;
                 ImGui::PopStyleColor();
                 ImGui::SameLine();
                 ImGui::PopID();
             }
 
-            float rightEdge = vp->WorkSize.x - 230;
+            float rightEdge = vp->WorkSize.x - 400;
             ImGui::SameLine(rightEdge);
+            {
+                int mins = kAutoLockMinutes[app.autoLockIdx];
+                std::string label = mins == 0 ? "AUTO-LOCK: OFF" : "AUTO-LOCK: " + std::to_string(mins) + " MIN";
+                PillButton((label + "##autolock").c_str(), mins != 0, ImVec2(160, 28));
+                if (ImGui::IsItemClicked())
+                    app.autoLockIdx = (app.autoLockIdx + 1) % (int)IM_ARRAYSIZE(kAutoLockMinutes);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Clears the password and any text on screen after this much idle time. Click to change.");
+                ImGui::SameLine();
+            }
             PillButton(app.privateMode ? "PRIVATE: ON" : "PRIVATE: OFF", app.privateMode,
                        ImVec2(140, 28));
             if (ImGui::IsItemClicked()) app.privateMode = !app.privateMode;
@@ -581,10 +723,12 @@ int main() {
             }
             EndCard();
 
-        } else {
-            // ---------------- TOOLS: Hash + Shred ----------------
+        } else if (app.activeTab == 2) {
+            // ---------------- TOOLS: Hash + Shred (top), Inspect / Verify (bottom) ----------------
+            float toolsRowH = (avail.y - ImGui::GetStyle().ItemSpacing.y) * 0.52f;
+            float inspectH = avail.y - toolsRowH - ImGui::GetStyle().ItemSpacing.y;
             float w = (avail.x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
-            if (BeginCard("hashcard", ImVec2(w, avail.y), "HASH A FILE")) {
+            if (BeginCard("hashcard", ImVec2(w, toolsRowH), "HASH A FILE")) {
                 ImGui::TextColored(theme::kTextDim, "File path");
                 PathRow(app, "##hashpath", app.hashPath, sizeof(app.hashPath), true, false);
                 ImGui::SetNextItemWidth(220);
@@ -605,7 +749,7 @@ int main() {
             EndCard();
 
             ImGui::SameLine();
-            if (BeginCard("shredcard", ImVec2(w, avail.y), "SECURE SHRED")) {
+            if (BeginCard("shredcard", ImVec2(w, toolsRowH), "SECURE SHRED")) {
                 ImGui::TextColored(theme::kRed, "Permanently destroys the target - cannot be undone.");
                 ImGui::TextColored(theme::kTextDim, "File or folder path");
                 PathRow(app, "##shredpath", app.shredPath, sizeof(app.shredPath), true, true);
@@ -618,8 +762,140 @@ int main() {
                 if (ImGui::Button("SHRED NOW", ImVec2(140, 0))) StartShred(app);
                 ImGui::PopStyleColor();
                 ImGui::EndDisabled();
+                ImGui::SameLine();
+                ImGui::ProgressBar(app.job.progress.load(), ImVec2(-1, 0));
+                if (!app.shredStatus.empty())
+                    ImGui::TextColored(app.shredOk ? theme::kGreen : theme::kRed, "%s", app.shredStatus.c_str());
+            }
+            EndCard();
+
+            if (BeginCard("inspectcard", ImVec2(avail.x, inspectH), "INSPECT / VERIFY AN ENCRYPTED FILE")) {
+                ImGui::Columns(2, nullptr, false);
+                ImGui::SetColumnWidth(0, avail.x * 0.55f);
+
+                ImGui::TextColored(theme::kTextDim, "Encrypted file");
+                PathRow(app, "##inspectpath", app.inspectPath, sizeof(app.inspectPath), true, false);
+                ImGui::Checkbox("Use key file instead of password##inspect", &app.useKeyfile);
+                if (app.useKeyfile) {
+                    PathRow(app, "##inspectkey", app.keyfilePath, sizeof(app.keyfilePath), true, false);
+                } else {
+                    ImGui::SetNextItemWidth(-1);
+                    ImGui::InputText("##inspectpw", app.password, sizeof(app.password),
+                                     app.privateMode ? ImGuiInputTextFlags_Password : 0);
+                }
+                bool busy = JobBusy(app);
+                if (ImGui::Button("INSPECT", ImVec2(110, 0))) {
+                    std::string p = pathutil::CleanPath(app.inspectPath);
+                    app.verifyLine.clear();
+                    app.inspectSummary = p.empty() ? "Enter a file path first."
+                                                   : vault::InspectFile(pathutil::ToPath(p)).summary;
+                }
+                ImGui::SameLine();
+                ImGui::BeginDisabled(busy);
+                if (ImGui::Button("VERIFY", ImVec2(110, 0))) StartVerify(app);
+                ImGui::EndDisabled();
+                ImGui::SameLine();
+                ImGui::ProgressBar(app.job.progress.load(), ImVec2(-1, 0));
+                ImGui::TextColored(theme::kTextDim, "Inspect needs no password. Verify checks every chunk.");
+
+                ImGui::NextColumn();
+                ImGui::BeginChild("inspectout", ImVec2(-1, -1), false);
+                if (!app.inspectSummary.empty()) ImGui::TextWrapped("%s", app.inspectSummary.c_str());
+                if (!app.verifyLine.empty()) {
+                    ImGui::Spacing();
+                    ImGui::TextColored(app.verifyOk ? theme::kGreen : theme::kRed, "%s", app.verifyLine.c_str());
+                }
+                ImGui::EndChild();
+                ImGui::Columns(1);
+            }
+            EndCard();
+
+        } else {
+            // ---------------- GENERATE: passwords / passphrases, key files ----------------
+            float w = (avail.x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+            if (BeginCard("gencard", ImVec2(w, avail.y), "PASSWORD GENERATOR")) {
+                PillButton("PASSWORD", app.genMode == 0, ImVec2(110, 26));
+                if (ImGui::IsItemClicked()) app.genMode = 0;
+                ImGui::SameLine();
+                PillButton("PASSPHRASE", app.genMode == 1, ImVec2(120, 26));
+                if (ImGui::IsItemClicked()) app.genMode = 1;
                 ImGui::Spacing();
-                ImGui::ProgressBar(app.job.progress.load(), ImVec2(-1, 18));
+
+                double bits = 0.0;
+                if (app.genMode == 0) {
+                    ImGui::SetNextItemWidth(220);
+                    ImGui::SliderInt("length", &app.genOpts.length, generator::kMinPasswordLength, 64);
+                    ImGui::Checkbox("a-z", &app.genOpts.lower);
+                    ImGui::SameLine();
+                    ImGui::Checkbox("A-Z", &app.genOpts.upper);
+                    ImGui::SameLine();
+                    ImGui::Checkbox("0-9", &app.genOpts.digits);
+                    ImGui::SameLine();
+                    ImGui::Checkbox("symbols", &app.genOpts.symbols);
+                    bits = generator::PasswordBits(app.genOpts);
+                } else {
+                    ImGui::SetNextItemWidth(220);
+                    ImGui::SliderInt("words", &app.genWords, generator::kMinWords, 12);
+                    ImGui::TextColored(theme::kTextDim, "Random words from a 2048-word list, joined with dashes.");
+                    bits = generator::PassphraseBits(app.genWords);
+                }
+
+                ImGui::Spacing();
+                if (ImGui::Button("GENERATE", ImVec2(140, 34))) {
+                    try {
+                        std::string out = app.genMode == 0 ? generator::GeneratePassword(app.genOpts)
+                                                           : generator::GeneratePassphrase(app.genWords);
+                        std::snprintf(app.genOutput, sizeof(app.genOutput), "%s", out.c_str());
+                        Wipe(&out[0], out.size());
+                        app.genNote.clear();
+                    } catch (const std::exception& e) {
+                        app.genNote = e.what();
+                    }
+                }
+
+                ImGui::SetNextItemWidth(-1);
+                ImGui::InputText("##genout", app.genOutput, sizeof(app.genOutput),
+                                 ImGuiInputTextFlags_ReadOnly |
+                                     (app.privateMode ? ImGuiInputTextFlags_Password : 0));
+                const char* rating = bits >= 80 ? "strong" : bits >= 60 ? "good" : "weak";
+                ImGui::TextColored(theme::kTextDim, "About %.0f bits of entropy (%s)", bits, rating);
+                if (!app.genNote.empty()) ImGui::TextColored(theme::kRed, "%s", app.genNote.c_str());
+
+                ImGui::Spacing();
+                ImGui::BeginDisabled(app.genOutput[0] == '\0');
+                if (ImGui::Button("COPY", ImVec2(100, 0))) {
+                    ImGui::SetClipboardText(app.genOutput);
+                    app.clipboardCopied = app.genOutput;
+                    app.clipboardClearAt = glfwGetTime() + 30.0;
+                    app.genNote = "Copied. The clipboard is cleared in 30 seconds.";
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("USE AS PASSWORD", ImVec2(170, 0))) {
+                    std::snprintf(app.password, sizeof(app.password), "%s", app.genOutput);
+                    app.useKeyfile = false;
+                    app.genNote = "Set as the password on the Home tab. Save it somewhere safe: it is not stored.";
+                }
+                ImGui::EndDisabled();
+                ImGui::TextColored(theme::kTextDim,
+                                   "Clipboard history tools (such as Win+V) may keep their own copy.");
+            }
+            EndCard();
+
+            ImGui::SameLine();
+            if (BeginCard("keycard", ImVec2(w, avail.y), "KEY FILE")) {
+                ImGui::TextWrapped(
+                    "A key file is a random 64-byte file you use instead of a password. "
+                    "Anyone who has the file can open what it protects, and if you lose it, "
+                    "everything encrypted with it is gone for good.");
+                ImGui::Spacing();
+                ImGui::TextColored(theme::kGold, "Keep a backup somewhere safe, and keep it private.");
+                ImGui::Spacing();
+                if (ImGui::Button("CREATE KEY FILE...", ImVec2(220, 36))) app.pendingKeyfile = true;
+                if (!app.keyfileMessage.empty()) {
+                    ImGui::Spacing();
+                    ImGui::TextColored(app.keyfileOk ? theme::kGreen : theme::kRed, "%s",
+                                       app.keyfileMessage.c_str());
+                }
             }
             EndCard();
         }

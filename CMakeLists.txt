@@ -10,6 +10,7 @@ set(SOURCES
     src/main.cpp
     src/vault.cpp
     src/filedialog.cpp
+    src/generator.cpp
     ${IMGUI_DIR}/imgui.cpp
     ${IMGUI_DIR}/imgui_draw.cpp
     ${IMGUI_DIR}/imgui_tables.cpp
@@ -69,6 +70,23 @@ endif()
 
 target_compile_options(securevault PRIVATE -Wall -Wextra -Wno-unused-parameter)
 
+# ---- Command-line version --------------------------------------------------
+if (WIN32)
+    set(CLI_CRYPTO_SRC src/vault_crypto_win.cpp)
+else()
+    set(CLI_CRYPTO_SRC src/vault_crypto_openssl.cpp)
+endif()
+add_executable(securevault-cli src/cli.cpp src/vault.cpp src/generator.cpp ${CLI_CRYPTO_SRC})
+target_include_directories(securevault-cli PRIVATE src)
+target_link_libraries(securevault-cli PRIVATE Threads::Threads)
+if (WIN32)
+    target_link_libraries(securevault-cli PRIVATE bcrypt shell32)
+    target_link_options(securevault-cli PRIVATE -static-libgcc -static-libstdc++ -static)
+else()
+    find_package(OpenSSL REQUIRED)
+    target_link_libraries(securevault-cli PRIVATE OpenSSL::Crypto)
+endif()
+
 # ---- Tests (crypto + file format) -----------------------------------------
 # cmake -DSECUREVAULT_BUILD_TESTS=ON ..   then run ./vault_tests
 option(SECUREVAULT_BUILD_TESTS "Build the crypto/file-format tests" OFF)
@@ -78,7 +96,7 @@ if (SECUREVAULT_BUILD_TESTS)
     else()
         set(VAULT_CRYPTO_SRC src/vault_crypto_openssl.cpp)
     endif()
-    add_executable(vault_tests tests/test_vault.cpp src/vault.cpp ${VAULT_CRYPTO_SRC})
+    add_executable(vault_tests tests/test_vault.cpp src/vault.cpp src/generator.cpp ${VAULT_CRYPTO_SRC})
     target_include_directories(vault_tests PRIVATE src)
     target_link_libraries(vault_tests PRIVATE Threads::Threads)
     if (WIN32)

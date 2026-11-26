@@ -8,7 +8,7 @@ struct GLFWwindow;
 
 namespace filedialog {
 
-enum class Kind { OpenFile, PickFolder };
+enum class Kind { OpenFile, PickFolder, SaveFile };
 
 // Makes the dialog appear on top of (and modal to) this window.
 void SetOwner(GLFWwindow* window);
