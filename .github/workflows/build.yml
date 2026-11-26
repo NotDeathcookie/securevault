@@ -29,6 +29,15 @@ jobs:
         run: cmake --build build
       - name: Run tests
         run: ./build/vault_tests.exe
+      - name: CLI smoke test
+        run: |
+          cd build
+          echo "hello from CI" > smoke.txt
+          SVPW=ci-test-password ./securevault-cli.exe encrypt smoke.txt --password-env SVPW
+          rm smoke.txt
+          SVPW=ci-test-password ./securevault-cli.exe decrypt smoke.txt.enc --password-env SVPW
+          cat smoke.txt
+          ./securevault-cli.exe inspect smoke.txt.enc
       - name: Bundle runtime DLL
         # The compiler runtime (libstdc++, libgcc, winpthreads) is statically
         # linked by CMakeLists.txt. The MSYS2 glfw package is shared-only
@@ -39,6 +48,7 @@ jobs:
           name: securevault-windows
           path: |
             build/securevault.exe
+            build/securevault-cli.exe
             build/glfw3.dll
 
   linux:
@@ -53,7 +63,18 @@ jobs:
         run: cmake --build build -j
       - name: Run tests
         run: ./build/vault_tests
+      - name: CLI smoke test
+        run: |
+          cd build
+          echo "hello from CI" > smoke.txt
+          SVPW=ci-test-password ./securevault-cli encrypt smoke.txt --password-env SVPW
+          rm smoke.txt
+          SVPW=ci-test-password ./securevault-cli decrypt smoke.txt.enc --password-env SVPW
+          cat smoke.txt
+          ./securevault-cli inspect smoke.txt.enc
       - uses: actions/upload-artifact@v4
         with:
           name: securevault-linux
-          path: build/securevault
+          path: |
+            build/securevault
+            build/securevault-cli
