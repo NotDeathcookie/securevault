@@ -15,6 +15,8 @@ An open-source desktop app for encrypting text, files, and folders, with secure 
 - **Secure shred**: overwrite files or folders with random data (1 to 5 passes) before deleting
 - **File hashing**: SHA-256, SHA-512, SHA-384, SHA-1, MD5
 - **Private mode**: masks the password field and hides the activity log
+- **Browse buttons** open the normal Windows file or folder picker, and paths pasted with quotes (Windows "Copy as path") work as they are
+- **Tamper detection**: removed, reordered, duplicated, or appended chunks are rejected, not just flipped bits
 - Large files are processed in 64 KB chunks on a background thread, with a live progress bar
 
 ## Download
@@ -27,7 +29,7 @@ Grab the latest build from the [Releases](../../releases) page.
 ## Using it
 
 1. Pick **TEXT**, **FILE**, or **FOLDER**, then **ENCRYPT** or **DECRYPT**.
-2. Enter the text or the path to the file or folder.
+2. Enter the text, or type, paste, or **Browse** for the file or folder.
 3. Enter a password, or tick *Use key file* and give the path to your key file.
 4. Click **START**.
 
@@ -83,13 +85,17 @@ src/
   vault_crypto.hpp          crypto interface
   vault_crypto_openssl.cpp  Linux/macOS backend (OpenSSL)
   vault_crypto_win.cpp      Windows backend (CNG / bcrypt)
+  pathutil.hpp              path clean-up (quotes, UTF-8)
+  filedialog.hpp / .cpp     native file and folder picker
+tests/                      crypto and file format tests
+THREAT_MODEL.md             what it protects against, and the file format
 third_party/imgui/          Dear ImGui
 original_python_source.py   the original Python prototype, kept for reference
 ```
 
 ## Technical details
 
-- **File format:** a 16-byte salt, followed by chunks of `[4-byte big-endian length][12-byte nonce | ciphertext | 16-byte tag]`. Each chunk gets a fresh random nonce.
+- **File format (v2):** a 25-byte header (`SVLT`, version, chunk size, 16-byte salt) followed by AES-256-GCM chunks. Each chunk is authenticated together with the header and its position, and the last chunk is marked as final, so truncation, reordering, and appended data are detected. Files from v1.0 can still be decrypted. Full details are in [THREAT_MODEL.md](THREAT_MODEL.md).
 - **Text format:** base64 of `salt (16) | nonce (12) | ciphertext | tag (16)`.
 - **Folders** are packed into a simple custom archive (relative path, size, bytes for each file) and then encrypted like a single file. This is not a ZIP file.
 
@@ -97,7 +103,6 @@ original_python_source.py   the original Python prototype, kept for reference
 
 This is a hobby project and has **not been independently audited**. Don't rely on it as the only copy of anything important.
 
-- Chunks are authenticated individually, but the file format does not protect against chunks being removed from the end or reordered.
 - Secure shredding overwrites the file's contents, but on SSDs, journaling or copy-on-write filesystems, and synced folders (OneDrive, Dropbox), old copies of the data may still exist elsewhere. It is not a guarantee of unrecoverable deletion.
 - There is no password recovery. If you lose the password or key file, the data is gone.
 

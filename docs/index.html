@@ -214,10 +214,11 @@
   <div class="wrap">
     <h2 class="section-title">How it works</h2>
     <p class="how-list">
-      Every file starts with a random 16-byte salt, then a series of chunks —
-      each one a fresh 12-byte nonce, the AES-256-GCM ciphertext, and a
-      16-byte authentication tag. Text payloads use the same layout, just
-      base64-encoded instead of written to disk.
+      Every file starts with a small header and a random 16-byte salt, then a
+      series of AES-256-GCM chunks. Each chunk is authenticated together with
+      the header and its position in the file, and the last chunk is marked as
+      final — so changing, removing, reordering, or appending chunks makes
+      decryption fail. Text uses a simpler single-message layout, base64-encoded.
       <br><br>
       <b>Folders</b> get packed into a small custom archive — relative
       path, size, and bytes for every file — which then gets encrypted the

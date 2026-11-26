@@ -12,6 +12,8 @@
 
 #include "vault.hpp"
 #include "theme.hpp"
+#include "pathutil.hpp"
+#include "filedialog.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -68,6 +70,12 @@ struct AppState {
     std::deque<float> progressHistory;  // rolling sparkline of recent activity
     std::vector<LogLine> logLines;
 
+    // A "Browse" click is recorded here and handled between frames, so the
+    // blocking system dialog never opens in the middle of drawing the UI.
+    char* browseTarget = nullptr;
+    size_t browseCap = 0;
+    filedialog::Kind browseKind = filedialog::Kind::OpenFile;
+
     std::thread worker;
 };
 
@@ -96,7 +104,7 @@ void AddLog(AppState& app, const std::string& text, bool ok) {
 
 std::vector<uint8_t> GetSecret(AppState& app) {
     if (app.useKeyfile) {
-        std::ifstream f(app.keyfilePath, std::ios::binary);
+        std::ifstream f(pathutil::ToPath(pathutil::CleanPath(app.keyfilePath)), std::ios::binary);
         if (!f) throw std::runtime_error("Could not open key file.");
         return std::vector<uint8_t>(std::istreambuf_iterator<char>(f),
                                      std::istreambuf_iterator<char>());
@@ -138,17 +146,20 @@ void StartOperation(AppState& app) {
                 }
             });
         } else if (mode == Mode::File) {
-            std::string inPath(app.path);
+            std::string inPath = pathutil::CleanPath(app.path);
+            if (inPath.empty()) throw std::runtime_error("Enter a file path first.");
             std::string outPath = enc ? inPath + ".enc"
                                        : (inPath.size() > 4 && inPath.substr(inPath.size() - 4) == ".enc"
                                               ? inPath.substr(0, inPath.size() - 4)
                                               : inPath + ".decrypted");
             app.worker = std::thread([&app, secret, inPath, outPath, enc]() {
-                if (enc) vault::EncryptFile(secret, inPath, outPath, app.job);
-                else     vault::DecryptFile(secret, inPath, outPath, app.job);
+                using pathutil::ToPath;
+                if (enc) vault::EncryptFile(secret, ToPath(inPath), ToPath(outPath), app.job);
+                else     vault::DecryptFile(secret, ToPath(inPath), ToPath(outPath), app.job);
             });
         } else {  // Folder
-            std::string inPath(app.path);
+            std::string inPath = pathutil::CleanPath(app.path);
+            if (inPath.empty()) throw std::runtime_error("Enter a folder path first.");
             std::string outPath;
             if (enc) {
                 std::string clean = inPath;
@@ -164,8 +175,9 @@ void StartOperation(AppState& app) {
                     outPath = inPath + "_restored";
             }
             app.worker = std::thread([&app, secret, inPath, outPath, enc]() {
-                if (enc) vault::EncryptFolder(secret, inPath, outPath, app.job);
-                else     vault::DecryptFolder(secret, inPath, outPath, app.job);
+                using pathutil::ToPath;
+                if (enc) vault::EncryptFolder(secret, ToPath(inPath), ToPath(outPath), app.job);
+                else     vault::DecryptFolder(secret, ToPath(inPath), ToPath(outPath), app.job);
             });
         }
     } catch (const std::exception& e) {
@@ -182,9 +194,12 @@ void StartHash(AppState& app) {
     app.hashResult[0] = '\0';
     if (app.worker.joinable()) app.worker.join();
 
-    std::string p(app.hashPath);
+    std::string p = pathutil::CleanPath(app.hashPath);
+    if (p.empty()) { app.job.SetResult(false, "Enter a file path first."); return; }
     vault::HashAlgo algo = kHashAlgoEnum[app.hashAlgoIdx];
-    app.worker = std::thread([&app, p, algo]() { vault::HashFile(p, algo, app.job); });
+    app.worker = std::thread([&app, p, algo]() {
+        vault::HashFile(pathutil::ToPath(p), algo, app.job);
+    });
 }
 
 void StartShred(AppState& app) {
@@ -195,9 +210,12 @@ void StartShred(AppState& app) {
     app.jobConsumed = false;
     if (app.worker.joinable()) app.worker.join();
 
-    std::string p(app.shredPath);
+    std::string p = pathutil::CleanPath(app.shredPath);
+    if (p.empty()) { app.job.SetResult(false, "Enter a file or folder path first."); return; }
     int passes = app.shredPasses;
-    app.worker = std::thread([&app, p, passes]() { vault::ShredPath(p, passes, app.job); });
+    app.worker = std::thread([&app, p, passes]() {
+        vault::ShredPath(pathutil::ToPath(p), passes, app.job);
+    });
 }
 
 // Pulls a finished job's result into the right place in app state + log/stats.
@@ -262,6 +280,35 @@ void PillButton(const char* label, bool active, const ImVec2& size = ImVec2(0, 0
     if (active) ImGui::PopStyleColor(2);
 }
 
+// A path text box with Browse button(s) on the same row. A path pasted with
+// surrounding quotes (Windows "Copy as path") has them removed right away.
+// Never use this for passwords.
+void PathRow(AppState& app, const char* id, char* buf, size_t cap, bool allowFile,
+             bool allowFolder) {
+    const float sp = ImGui::GetStyle().ItemSpacing.x;
+    const bool both = allowFile && allowFolder;
+    const float total = both ? (60.0f + 70.0f + 2 * sp) : (90.0f + sp);
+
+    ImGui::SetNextItemWidth(-total);
+    if (ImGui::InputText(id, buf, cap)) pathutil::StripQuotesInPlace(buf, cap);
+    ImGui::SameLine();
+
+    auto request = [&](filedialog::Kind kind) {
+        app.browseTarget = buf;
+        app.browseCap = cap;
+        app.browseKind = kind;
+    };
+    ImGui::PushID(id);
+    if (both) {
+        if (ImGui::Button("File", ImVec2(60, 0))) request(filedialog::Kind::OpenFile);
+        ImGui::SameLine();
+        if (ImGui::Button("Folder", ImVec2(70, 0))) request(filedialog::Kind::PickFolder);
+    } else if (ImGui::Button("Browse", ImVec2(90, 0))) {
+        request(allowFolder ? filedialog::Kind::PickFolder : filedialog::Kind::OpenFile);
+    }
+    ImGui::PopID();
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------
@@ -282,6 +329,7 @@ int main() {
     GLFWwindow* window = glfwCreateWindow(1180, 760, "Secure Vault", nullptr, nullptr);
     if (!window) { glfwTerminate(); return 1; }
     glfwMakeContextCurrent(window);
+    filedialog::SetOwner(window);
     glfwSwapInterval(1);
 
     IMGUI_CHECKVERSION();
@@ -300,6 +348,17 @@ int main() {
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
+
+        // Handle a pending Browse click here, outside of any ImGui frame.
+        if (app.browseTarget) {
+            std::string picked;
+            if (filedialog::Browse(app.browseKind, picked)) {
+                picked = pathutil::CleanPath(picked);
+                std::snprintf(app.browseTarget, app.browseCap, "%s", picked.c_str());
+            }
+            app.browseTarget = nullptr;
+        }
+
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
@@ -403,16 +462,17 @@ int main() {
                 } else {
                     ImGui::TextColored(theme::kTextDim, app.mode == Mode::File
                                             ? "File path" : "Folder path");
-                    ImGui::SetNextItemWidth(-1);
-                    ImGui::InputText("##path", app.path, sizeof(app.path));
+                    // Encrypting a folder picks a folder; everything else picks a file
+                    // (decrypting a folder starts from its .enc file).
+                    bool pickFolder = app.mode == Mode::Folder && app.encryptDirection;
+                    PathRow(app, "##path", app.path, sizeof(app.path), !pickFolder, pickFolder);
                 }
 
                 ImGui::Spacing();
                 ImGui::TextColored(theme::kTextDim, "Authentication");
                 ImGui::Checkbox("Use key file instead of password", &app.useKeyfile);
                 if (app.useKeyfile) {
-                    ImGui::SetNextItemWidth(-1);
-                    ImGui::InputText("##keyfile", app.keyfilePath, sizeof(app.keyfilePath));
+                    PathRow(app, "##keyfile", app.keyfilePath, sizeof(app.keyfilePath), true, false);
                 } else {
                     ImGui::SetNextItemWidth(-1);
                     ImGuiInputTextFlags pwFlags =
@@ -442,7 +502,7 @@ int main() {
                 StatusDot(!busy, busy ? "Operation running..." : "Idle - ready for input");
                 ImGui::Spacing();
                 ImGui::TextColored(theme::kTextDim, "Cipher");
-                ImGui::Text("AES-256-GCM");
+                ImGui::Text("AES-256-GCM, file format v2");
                 ImGui::TextColored(theme::kTextDim, "Key derivation");
                 ImGui::Text("PBKDF2-HMAC-SHA256, 600,000 rounds");
             }
@@ -526,8 +586,7 @@ int main() {
             float w = (avail.x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
             if (BeginCard("hashcard", ImVec2(w, avail.y), "HASH A FILE")) {
                 ImGui::TextColored(theme::kTextDim, "File path");
-                ImGui::SetNextItemWidth(-1);
-                ImGui::InputText("##hashpath", app.hashPath, sizeof(app.hashPath));
+                PathRow(app, "##hashpath", app.hashPath, sizeof(app.hashPath), true, false);
                 ImGui::SetNextItemWidth(220);
                 ImGui::Combo("##algo", &app.hashAlgoIdx, kHashAlgoNames,
                              IM_ARRAYSIZE(kHashAlgoNames));
@@ -549,8 +608,7 @@ int main() {
             if (BeginCard("shredcard", ImVec2(w, avail.y), "SECURE SHRED")) {
                 ImGui::TextColored(theme::kRed, "Permanently destroys the target - cannot be undone.");
                 ImGui::TextColored(theme::kTextDim, "File or folder path");
-                ImGui::SetNextItemWidth(-1);
-                ImGui::InputText("##shredpath", app.shredPath, sizeof(app.shredPath));
+                PathRow(app, "##shredpath", app.shredPath, sizeof(app.shredPath), true, true);
                 ImGui::SetNextItemWidth(160);
                 ImGui::SliderInt("passes", &app.shredPasses, 1, 5);
                 ImGui::Checkbox("I understand this is irreversible", &app.shredConfirmed);

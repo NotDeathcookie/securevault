@@ -1,6 +1,7 @@
 // Tests for the SecureVault crypto and container format.
 // Build with -DSECUREVAULT_BUILD_TESTS=ON, run the vault_tests binary.
 // Exits non-zero on any failure.
+#include "pathutil.hpp"
 #include "vault.hpp"
 
 #include <cstdio>
@@ -208,11 +209,32 @@ static void TestPathTraversal() {
     CHECK(!fs::exists(g_dir / "evil.txt"), "nothing written outside destination");
 }
 
+static void TestPathCleaning() {
+    using pathutil::CleanPath;
+    CHECK(CleanPath("\"C:\\Users\\me\\my file.txt\"") == "C:\\Users\\me\\my file.txt", "strips Windows copy-as-path quotes");
+    CHECK(CleanPath("  \"C:\\x\"  ") == "C:\\x", "trims spaces around quoted path");
+    CHECK(CleanPath("'/home/me/a b'") == "/home/me/a b", "strips single quotes");
+    CHECK(CleanPath("\xE2\x80\x9C" "C:\\x" "\xE2\x80\x9D") == "C:\\x", "strips curly double quotes");
+    CHECK(CleanPath("C:\\no quotes here") == "C:\\no quotes here", "leaves unquoted paths alone");
+    CHECK(CleanPath("\"unmatched") == "\"unmatched", "leaves an unmatched quote alone");
+    CHECK(CleanPath("\"\"") == "", "empty quotes become empty");
+    CHECK(CleanPath("\"\"C:\\x\"\"") == "C:\\x", "strips doubled quotes");
+    CHECK(CleanPath("   ") == "", "whitespace only becomes empty");
+
+    char buf[64] = "\"C:\\a b\"";
+    pathutil::StripQuotesInPlace(buf, sizeof(buf));
+    CHECK(std::string(buf) == "C:\\a b", "in-place strip while editing");
+    char typing[64] = "C:\\a ";
+    pathutil::StripQuotesInPlace(typing, sizeof(typing));
+    CHECK(std::string(typing) == "C:\\a ", "in-place strip keeps trailing space while typing");
+}
+
 int main() {
     std::random_device rd;
     g_dir = fs::temp_directory_path() / ("svtests_" + std::to_string(rd()));
     fs::create_directories(g_dir);
 
+    TestPathCleaning();
     TestTextAndWrongPassword();
     TestRoundTripSizes();
     TestWrongPasswordFile();

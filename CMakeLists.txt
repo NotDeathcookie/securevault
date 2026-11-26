@@ -9,6 +9,7 @@ set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/third_party/imgui)
 set(SOURCES
     src/main.cpp
     src/vault.cpp
+    src/filedialog.cpp
     ${IMGUI_DIR}/imgui.cpp
     ${IMGUI_DIR}/imgui_draw.cpp
     ${IMGUI_DIR}/imgui_tables.cpp
@@ -42,11 +43,11 @@ if (WIN32)
         target_include_directories(securevault PRIVATE ${SECUREVAULT_GLFW_DIR}/include)
         target_link_libraries(securevault PRIVATE
             ${SECUREVAULT_GLFW_DIR}/lib/libglfw3.a
-            opengl32 gdi32 bcrypt
+            opengl32 gdi32 bcrypt ole32 uuid
         )
     else()
         find_package(glfw3 CONFIG REQUIRED)
-        target_link_libraries(securevault PRIVATE glfw opengl32 gdi32 bcrypt)
+        target_link_libraries(securevault PRIVATE glfw opengl32 gdi32 bcrypt ole32 uuid)
     endif()
     # Statically link the mingw runtime (libgcc/libstdc++/winpthread) so the
     # .exe runs on a stock Windows machine with no extra DLLs to install.
