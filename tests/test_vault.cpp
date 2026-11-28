@@ -3,6 +3,7 @@
 // Exits non-zero on any failure.
 #include "generator.hpp"
 #include "pathutil.hpp"
+#include "settings.hpp"
 #include "wordlist.hpp"
 #include "vault.hpp"
 
@@ -13,6 +14,7 @@
 #include <algorithm>
 #include <random>
 #include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -382,12 +384,46 @@ static void TestCommaPaths() {
           "comma-named file inside a comma-named folder matches");
 }
 
+static void TestSettings() {
+    settings::Ui u;
+    u.autoLockIdx = 3; u.privateMode = true; u.hashAlgoIdx = 2; u.shredPasses = 4; u.genMode = 1;
+    u.genLength = 33; u.genLower = false; u.genUpper = true; u.genDigits = false; u.genSymbols = true; u.genWords = 9;
+
+    fs::path p = g_dir / "cfg" / "ui.ini";
+    CHECK(settings::Save(p, u), "settings save creates the folder and file");
+    CHECK(settings::Load(p) == u, "settings round trip");
+
+    CHECK(settings::Load(g_dir / "no_such" / "ui.ini") == settings::Ui(), "missing file gives defaults");
+
+    std::istringstream bad("auto_lock_index=99\nshred_passes=-5\npassword_length=100000\npassphrase_words=0\n"
+                           "hash_algorithm=abc\nunknown_key=7\nthis line has no equals sign\n=5\n");
+    settings::Ui c = settings::Parse(bad);
+    CHECK(c.autoLockIdx == 4 && c.shredPasses == 1 && c.genLength == 64 && c.genWords == 4,
+          "out-of-range values are clamped");
+    CHECK(c.hashAlgoIdx == settings::Ui().hashAlgoIdx, "a non-numeric value is ignored");
+
+    std::istringstream none("password_lower=0\npassword_upper=0\npassword_digits=0\npassword_symbols=0\n");
+    settings::Ui n = settings::Parse(none);
+    CHECK(n.genLower || n.genUpper || n.genDigits || n.genSymbols, "at least one character type stays selected");
+
+    std::istringstream partial("shred_passes=5\n");
+    settings::Ui part = settings::Parse(partial);
+    CHECK(part.shredPasses == 5 && part.autoLockIdx == settings::Ui().autoLockIdx,
+          "a partial file keeps defaults for the rest");
+
+    std::ostringstream out;
+    settings::Write(out, u);
+    CHECK(out.str().find("password") != std::string::npos && out.str().find("secret") == std::string::npos,
+          "the settings file holds only preferences");
+}
+
 int main() {
     std::random_device rd;
     g_dir = fs::temp_directory_path() / ("svtests_" + std::to_string(rd()));
     fs::create_directories(g_dir);
 
     TestPathCleaning();
+    TestSettings();
     TestCommaPaths();
     TestOutputNames();
     TestGenerators();

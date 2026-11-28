@@ -17,6 +17,7 @@
 #include "generator.hpp"
 #include "pathutil.hpp"
 #include "vault.hpp"
+#include "version.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -45,7 +46,7 @@
   #include <unistd.h>
 #endif
 
-static const char* kVersion = "1.3";
+static const char* kVersion = SV_VERSION;
 
 namespace {
 

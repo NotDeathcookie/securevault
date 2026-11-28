@@ -16,6 +16,7 @@ An open-source desktop app for encrypting text, files, and folders, with secure 
 - **File hashing**: SHA-256, SHA-512, SHA-384, SHA-1, MD5
 - **Private mode**: masks the password field and hides the activity log
 - **Drag and drop**: drop a file or folder on the window and the path box fills in (on the Home tab it also picks the right mode, and decrypt for `.enc` files; on the Tools tab it goes to Inspect or Hash)
+- **Remembers your settings**: auto-lock time, Private mode, hash algorithm, shred passes, and generator options (never passwords or text)
 - **Browse buttons** open the normal Windows file or folder picker, and paths pasted with quotes (Windows "Copy as path") work as they are
 - **Tamper detection**: removed, reordered, duplicated, or appended chunks are rejected, not just flipped bits
 - **Password and passphrase generator**: random passwords (choose length and character types) or passphrases from a 2048-word list, with an entropy estimate; a copied password is cleared from the clipboard after 30 seconds
@@ -31,6 +32,14 @@ Grab the latest build from the [Releases](../../releases) page.
 
 - **Windows:** download the Windows zip, extract it, and run `securevault.exe` (keep `glfw3.dll` next to it). `securevault-cli.exe` is the command-line version. No installer.
 - **Linux:** extract the archive, run `chmod +x securevault securevault-cli`, then run them. Requires GLFW and OpenSSL (`libglfw3`, `libssl3`).
+
+**Check your download.** Each release lists SHA-256 hashes. Compare yours with the command line tool:
+
+```
+securevault-cli hash securevault-windows.zip
+```
+
+The CI build also produces a `SHA256SUMS.txt` next to the programs. The current version is shown in the window title and by `securevault-cli version`.
 
 ## Using it
 
@@ -114,6 +123,7 @@ src/
   generator.hpp / .cpp      password, passphrase, and key file generation
   wordlist.hpp              the 2048-word passphrase list
   cli.cpp                   the securevault-cli command line tool
+  settings.hpp, version.hpp remembered preferences and the version number
 tests/                      crypto and file format tests
 THREAT_MODEL.md             what it protects against, and the file format
 third_party/imgui/          Dear ImGui
@@ -132,6 +142,10 @@ This is a hobby project and has **not been independently audited**. Don't rely o
 
 - Secure shredding overwrites the file's contents, but on SSDs, journaling or copy-on-write filesystems, and synced folders (OneDrive, Dropbox), old copies of the data may still exist elsewhere. It is not a guarantee of unrecoverable deletion.
 - There is no password recovery. If you lose the password or key file, the data is gone.
+
+## Security
+
+To report a vulnerability, see [SECURITY.md](SECURITY.md). For what SecureVault does and does not protect against, see [THREAT_MODEL.md](THREAT_MODEL.md).
 
 ## Contributing
 

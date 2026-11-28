@@ -15,6 +15,8 @@
 #include "pathutil.hpp"
 #include "filedialog.hpp"
 #include "generator.hpp"
+#include "settings.hpp"
+#include "version.hpp"
 
 // Optional build-time customisation. A derived build can set these with compiler
 // definitions: SV_APP_NAME / SV_LOGO_TEXT rename the app, SV_THEME_MAROON picks
@@ -22,6 +24,9 @@
 // extras.hpp (extras::kTabName, extras::Init(), extras::Draw()).
 #ifndef SV_APP_NAME
 #define SV_APP_NAME "Secure Vault"
+#endif
+#ifndef SV_SETTINGS_DIR
+#define SV_SETTINGS_DIR "SecureVault"
 #endif
 #ifndef SV_LOGO_TEXT
 #define SV_LOGO_TEXT "VAULT"
@@ -444,6 +449,36 @@ void DropCallback(GLFWwindow*, int count, const char** paths) {
     }
 }
 
+settings::Ui SnapshotSettings(const AppState& a) {
+    settings::Ui u;
+    u.autoLockIdx = a.autoLockIdx;
+    u.privateMode = a.privateMode;
+    u.hashAlgoIdx = a.hashAlgoIdx;
+    u.shredPasses = a.shredPasses;
+    u.genMode = a.genMode;
+    u.genLength = a.genOpts.length;
+    u.genLower = a.genOpts.lower;
+    u.genUpper = a.genOpts.upper;
+    u.genDigits = a.genOpts.digits;
+    u.genSymbols = a.genOpts.symbols;
+    u.genWords = a.genWords;
+    return u;
+}
+
+void ApplySettings(AppState& a, const settings::Ui& u) {
+    a.autoLockIdx = u.autoLockIdx;
+    a.privateMode = u.privateMode;
+    a.hashAlgoIdx = u.hashAlgoIdx;
+    a.shredPasses = u.shredPasses;
+    a.genMode = u.genMode;
+    a.genOpts.length = u.genLength;
+    a.genOpts.lower = u.genLower;
+    a.genOpts.upper = u.genUpper;
+    a.genOpts.digits = u.genDigits;
+    a.genOpts.symbols = u.genSymbols;
+    a.genWords = u.genWords;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------
@@ -461,7 +496,7 @@ int main() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
 
-    GLFWwindow* window = glfwCreateWindow(1180, 760, SV_APP_NAME, nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(1180, 760, SV_APP_NAME " " SV_VERSION, nullptr, nullptr);
     if (!window) { glfwTerminate(); return 1; }
     glfwMakeContextCurrent(window);
     filedialog::SetOwner(window);
@@ -479,9 +514,12 @@ int main() {
     ImGui_ImplOpenGL3_Init(glsl_version);
 
     AppState app;
+    const auto settingsPath = settings::FilePath(SV_SETTINGS_DIR);
+    settings::Ui lastSaved = settings::Load(settingsPath);
+    ApplySettings(app, lastSaved);
     g_dropTarget = &app;
     glfwSetDropCallback(window, DropCallback);
-    AddLog(app, SV_APP_NAME " initialized. AES-256-GCM / PBKDF2-HMAC-SHA256 (600k).", true);
+    AddLog(app, SV_APP_NAME " " SV_VERSION " initialized. AES-256-GCM / PBKDF2-HMAC-SHA256 (600k).", true);
 #ifdef SV_EXTRAS
     extras::Init();
 #endif
@@ -548,6 +586,14 @@ int main() {
                             ImGui::IsKeyPressed(ImGuiKey_LeftArrow) || ImGui::IsKeyPressed(ImGuiKey_RightArrow) ||
                             ImGui::IsKeyPressed(ImGuiKey_UpArrow) || ImGui::IsKeyPressed(ImGuiKey_DownArrow);
             UpdateAutoLock(app, now, activity);
+
+            // Remember preferences. Wait for the mouse to be released so dragging a
+            // slider does not write the file on every frame.
+            settings::Ui current = SnapshotSettings(app);
+            if (!(current == lastSaved) && !ImGui::IsAnyMouseDown()) {
+                settings::Save(settingsPath, current);
+                lastSaved = current;
+            }
         }
 
         // F9 toggles the window's title bar and border (handy for clean screenshots).
@@ -984,6 +1030,10 @@ int main() {
     }
 
     if (app.worker.joinable()) app.worker.join();
+
+#ifdef SV_EXTRAS
+    extras::Shutdown();
+#endif
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
