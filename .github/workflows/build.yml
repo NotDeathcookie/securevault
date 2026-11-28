@@ -43,6 +43,8 @@ jobs:
         # linked by CMakeLists.txt. The MSYS2 glfw package is shared-only
         # though, so glfw3.dll must ship alongside the exe.
         run: cp /ucrt64/bin/glfw3.dll build/
+      - name: Checksums
+        run: cd build && sha256sum securevault.exe securevault-cli.exe glfw3.dll > SHA256SUMS.txt && cat SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
         with:
           name: securevault-windows
@@ -50,6 +52,7 @@ jobs:
             build/securevault.exe
             build/securevault-cli.exe
             build/glfw3.dll
+            build/SHA256SUMS.txt
 
   linux:
     runs-on: ubuntu-latest
@@ -72,9 +75,12 @@ jobs:
           SVPW=ci-test-password ./securevault-cli decrypt smoke.txt.enc --password-env SVPW
           cat smoke.txt
           ./securevault-cli inspect smoke.txt.enc
+      - name: Checksums
+        run: cd build && sha256sum securevault securevault-cli > SHA256SUMS.txt && cat SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
         with:
           name: securevault-linux
           path: |
             build/securevault
             build/securevault-cli
+            build/SHA256SUMS.txt
