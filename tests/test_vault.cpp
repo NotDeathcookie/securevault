@@ -359,12 +359,36 @@ static void TestInspectAndVerify() {
     CHECK(lj.ok.load(), "verify: legacy v1 file passes");
 }
 
+static void TestCommaPaths() {
+    using pathutil::CleanPath;
+    CHECK(CleanPath("\"C:\\Users\\me\\a,b, c.txt\"") == "C:\\Users\\me\\a,b, c.txt", "quoted path with commas keeps its commas");
+    CHECK(CleanPath("C:\\a,b\\c.txt") == "C:\\a,b\\c.txt", "unquoted path with commas is untouched");
+
+    fs::path in = g_dir / "report, final, v2.txt";
+    WriteAll(in, RandomData(1500, 11));
+    fs::path enc = fs::path(in.string() + ".enc"), dec = g_dir / "out, restored.txt";
+    CHECK(Enc(kSecret, in, enc), "encrypt a file whose name contains commas");
+    CHECK(Dec(kSecret, enc, dec), "decrypt it to a name with commas");
+    CHECK(ReadAll(dec) == ReadAll(in), "comma-named file round trips");
+
+    fs::path dir = g_dir / "my, folder, x";
+    fs::create_directories(dir / "sub, dir");
+    WriteAll(dir / "sub, dir" / "a, b.txt", RandomData(300, 12));
+    fs::path archive = g_dir / "my, folder, x_folder.enc", out = g_dir / "my, folder, x_restored";
+    VaultJob j1; EncryptFolder(kSecret, dir, archive, j1);
+    VaultJob j2; DecryptFolder(kSecret, archive, out, j2);
+    CHECK(j1.ok.load() && j2.ok.load(), "folder with commas in its names round trips");
+    CHECK(ReadAll(out / "sub, dir" / "a, b.txt") == ReadAll(dir / "sub, dir" / "a, b.txt"),
+          "comma-named file inside a comma-named folder matches");
+}
+
 int main() {
     std::random_device rd;
     g_dir = fs::temp_directory_path() / ("svtests_" + std::to_string(rd()));
     fs::create_directories(g_dir);
 
     TestPathCleaning();
+    TestCommaPaths();
     TestOutputNames();
     TestGenerators();
     TestInspectAndVerify();

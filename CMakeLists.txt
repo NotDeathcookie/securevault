@@ -22,6 +22,13 @@ set(SOURCES
 
 if (WIN32)
     list(APPEND SOURCES src/vault_crypto_win.cpp)
+    # Program icon. Skipped quietly if this toolchain has no resource compiler (windres).
+    include(CheckLanguage)
+    check_language(RC)
+    if (CMAKE_RC_COMPILER)
+        enable_language(RC)
+        list(APPEND SOURCES resources/securevault.rc)
+    endif()
 else()
     list(APPEND SOURCES src/vault_crypto_openssl.cpp)
 endif()
@@ -29,6 +36,7 @@ endif()
 add_executable(securevault ${SOURCES})
 
 target_include_directories(securevault PRIVATE
+    resources
     ${IMGUI_DIR}
     ${IMGUI_DIR}/backends
 )

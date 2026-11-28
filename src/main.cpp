@@ -16,6 +16,20 @@
 #include "filedialog.hpp"
 #include "generator.hpp"
 
+// Optional build-time customisation. A derived build can set these with compiler
+// definitions: SV_APP_NAME / SV_LOGO_TEXT rename the app, SV_THEME_MAROON picks
+// the alternative palette (theme.hpp), and SV_EXTRAS adds one extra tab drawn by
+// extras.hpp (extras::kTabName, extras::Init(), extras::Draw()).
+#ifndef SV_APP_NAME
+#define SV_APP_NAME "Secure Vault"
+#endif
+#ifndef SV_LOGO_TEXT
+#define SV_LOGO_TEXT "VAULT"
+#endif
+#ifdef SV_EXTRAS
+#include "extras.hpp"
+#endif
+
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -92,6 +106,10 @@ struct AppState {
     double lastActivity = 0.0;
 
     Target jobTarget = Target::Home;
+
+    // A file or folder dropped on the window (filled by a GLFW callback, handled each frame).
+    std::string pendingDrop;
+    int pendingDropCount = 0;
 
     // Job + stats
     vault::VaultJob job;
@@ -392,6 +410,40 @@ void PathRow(AppState& app, const char* id, char* buf, size_t cap, bool allowFil
     ImGui::PopID();
 }
 
+// Dropping a file or folder on the window fills in the relevant path box:
+//   Home tab:  the operation path (and the mode, and encrypt/decrypt, are chosen to match)
+//   Tools tab: an .enc file goes to Inspect / Verify, any other file to Hash
+void HandleDrop(AppState& app, const std::string& dropped, int count) {
+    std::error_code ec;
+    const std::string p = pathutil::CleanPath(dropped);
+    const bool isDir = std::filesystem::is_directory(pathutil::ToPath(p), ec);
+    const bool isEnc = pathutil::EndsWith(p, ".enc");
+    const std::string extra = count > 1 ? " (only the first of " + std::to_string(count) + " items was used)" : "";
+
+    if (app.activeTab == 0) {
+        std::snprintf(app.path, sizeof(app.path), "%s", p.c_str());
+        if (isDir) { app.mode = Mode::Folder; app.encryptDirection = true; }
+        else if (pathutil::EndsWith(p, "_folder.enc")) { app.mode = Mode::Folder; app.encryptDirection = false; }
+        else { app.mode = Mode::File; app.encryptDirection = !isEnc; }
+        AddLog(app, "Dropped: " + p + extra, true);
+    } else if (app.activeTab == 2) {
+        if (isDir) { AddLog(app, "Drop a file on the Tools tab, not a folder.", false); return; }
+        char* target = isEnc ? app.inspectPath : app.hashPath;
+        size_t cap = isEnc ? sizeof(app.inspectPath) : sizeof(app.hashPath);
+        std::snprintf(target, cap, "%s", p.c_str());
+        AddLog(app, std::string("Dropped for ") + (isEnc ? "Inspect / Verify: " : "Hash: ") + p + extra, true);
+    }
+}
+
+AppState* g_dropTarget = nullptr;
+
+void DropCallback(GLFWwindow*, int count, const char** paths) {
+    if (g_dropTarget && count > 0 && paths && paths[0]) {
+        g_dropTarget->pendingDrop = paths[0];  // GLFW delivers UTF-8
+        g_dropTarget->pendingDropCount = count;
+    }
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------
@@ -409,7 +461,7 @@ int main() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
 
-    GLFWwindow* window = glfwCreateWindow(1180, 760, "Secure Vault", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(1180, 760, SV_APP_NAME, nullptr, nullptr);
     if (!window) { glfwTerminate(); return 1; }
     glfwMakeContextCurrent(window);
     filedialog::SetOwner(window);
@@ -427,10 +479,21 @@ int main() {
     ImGui_ImplOpenGL3_Init(glsl_version);
 
     AppState app;
-    AddLog(app, "Secure Vault initialized. AES-256-GCM / PBKDF2-HMAC-SHA256 (600k).", true);
+    g_dropTarget = &app;
+    glfwSetDropCallback(window, DropCallback);
+    AddLog(app, SV_APP_NAME " initialized. AES-256-GCM / PBKDF2-HMAC-SHA256 (600k).", true);
+#ifdef SV_EXTRAS
+    extras::Init();
+#endif
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
+
+        if (!app.pendingDrop.empty()) {
+            HandleDrop(app, app.pendingDrop, app.pendingDropCount);
+            app.pendingDrop.clear();
+            app.lastActivity = glfwGetTime();  // a drop counts as activity for auto-lock
+        }
 
         // Handle a pending Browse click here, outside of any ImGui frame.
         if (app.browseTarget) {
@@ -519,13 +582,16 @@ int main() {
             ImGui::SameLine();
             ImGui::SetWindowFontScale(1.6f);
             ImGui::PushStyleColor(ImGuiCol_Text, theme::kTextBright);
-            ImGui::TextUnformatted("VAULT");
+            ImGui::TextUnformatted(SV_LOGO_TEXT);
             ImGui::PopStyleColor();
             ImGui::SetWindowFontScale(1.0f);
 
             ImGui::SameLine(0, 40);
-            const char* tabs[] = {"Home", "Log", "Tools", "Generate"};
-            for (int i = 0; i < 4; i++) {
+            std::vector<const char*> tabs = {"Home", "Log", "Tools", "Generate"};
+#ifdef SV_EXTRAS
+            tabs.push_back(extras::kTabName);
+#endif
+            for (int i = 0; i < (int)tabs.size(); i++) {
                 ImGui::PushID(i);
                 if (app.activeTab == i) ImGui::PushStyleColor(ImGuiCol_Text, theme::kPink);
                 else ImGui::PushStyleColor(ImGuiCol_Text, theme::kTextDim);
@@ -810,7 +876,7 @@ int main() {
             }
             EndCard();
 
-        } else {
+        } else if (app.activeTab == 3) {
             // ---------------- GENERATE: passwords / passphrases, key files ----------------
             float w = (avail.x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
             if (BeginCard("gencard", ImVec2(w, avail.y), "PASSWORD GENERATOR")) {
@@ -899,6 +965,11 @@ int main() {
             }
             EndCard();
         }
+#ifdef SV_EXTRAS
+        else if (app.activeTab == 4) {
+            extras::Draw(avail.x, avail.y);
+        }
+#endif
 
         ImGui::End();  // ##root
 

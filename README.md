@@ -15,6 +15,7 @@ An open-source desktop app for encrypting text, files, and folders, with secure 
 - **Secure shred**: overwrite files or folders with random data (1 to 5 passes) before deleting
 - **File hashing**: SHA-256, SHA-512, SHA-384, SHA-1, MD5
 - **Private mode**: masks the password field and hides the activity log
+- **Drag and drop**: drop a file or folder on the window and the path box fills in (on the Home tab it also picks the right mode, and decrypt for `.enc` files; on the Tools tab it goes to Inspect or Hash)
 - **Browse buttons** open the normal Windows file or folder picker, and paths pasted with quotes (Windows "Copy as path") work as they are
 - **Tamper detection**: removed, reordered, duplicated, or appended chunks are rejected, not just flipped bits
 - **Password and passphrase generator**: random passwords (choose length and character types) or passphrases from a 2048-word list, with an entropy estimate; a copied password is cleared from the clipboard after 30 seconds

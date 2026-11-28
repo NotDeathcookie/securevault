@@ -7,20 +7,51 @@
 
 namespace theme {
 
-// Palette
-inline const ImVec4 kBgTop      = ImVec4(0.09f, 0.03f, 0.08f, 1.00f);  // near-black plum
-inline const ImVec4 kBgBottom   = ImVec4(0.16f, 0.05f, 0.13f, 1.00f);  // deep maroon
-inline const ImVec4 kCard       = ImVec4(0.17f, 0.06f, 0.15f, 0.92f);
-inline const ImVec4 kCardHover  = ImVec4(0.21f, 0.08f, 0.19f, 0.95f);
-inline const ImVec4 kCardBorder = ImVec4(0.85f, 0.25f, 0.55f, 0.35f);
-inline const ImVec4 kPink       = ImVec4(0.98f, 0.25f, 0.58f, 1.00f);  // primary neon pink
-inline const ImVec4 kPinkSoft   = ImVec4(0.98f, 0.25f, 0.58f, 0.55f);
-inline const ImVec4 kPinkDim    = ImVec4(0.55f, 0.18f, 0.38f, 1.00f);
-inline const ImVec4 kGold       = ImVec4(0.98f, 0.80f, 0.35f, 1.00f);  // "on stream" dot etc.
-inline const ImVec4 kGreen      = ImVec4(0.45f, 0.92f, 0.55f, 1.00f);
-inline const ImVec4 kRed        = ImVec4(0.95f, 0.30f, 0.35f, 1.00f);
-inline const ImVec4 kTextDim    = ImVec4(0.80f, 0.68f, 0.76f, 0.70f);
-inline const ImVec4 kTextBright = ImVec4(0.98f, 0.94f, 0.97f, 1.00f);
+// Palette. Default is the pink-neon theme; building with SV_THEME_MAROON selects
+// a near-black / dark maroon / blood-red variant.
+#if defined(SV_THEME_MAROON)
+inline const ImVec4 kBgTop         = ImVec4(0.04f, 0.015f, 0.015f, 1.00f);
+inline const ImVec4 kBgBottom      = ImVec4(0.14f, 0.035f, 0.035f, 1.00f);
+inline const ImVec4 kCard          = ImVec4(0.13f, 0.045f, 0.045f, 0.92f);
+inline const ImVec4 kCardHover     = ImVec4(0.18f, 0.060f, 0.060f, 0.95f);
+inline const ImVec4 kCardBorder    = ImVec4(0.75f, 0.140f, 0.120f, 0.35f);
+inline const ImVec4 kPink          = ImVec4(0.80f, 0.130f, 0.110f, 1.00f);  // accent
+inline const ImVec4 kPinkSoft      = ImVec4(0.80f, 0.130f, 0.110f, 0.55f);
+inline const ImVec4 kPinkDim       = ImVec4(0.42f, 0.090f, 0.080f, 1.00f);
+inline const ImVec4 kGold          = ImVec4(0.92f, 0.600f, 0.220f, 1.00f);
+inline const ImVec4 kGreen         = ImVec4(0.45f, 0.850f, 0.500f, 1.00f);
+inline const ImVec4 kRed           = ImVec4(0.95f, 0.300f, 0.280f, 1.00f);
+inline const ImVec4 kTextDim       = ImVec4(0.78f, 0.660f, 0.660f, 0.70f);
+inline const ImVec4 kTextBright    = ImVec4(0.97f, 0.930f, 0.930f, 1.00f);
+inline const ImVec4 kFrame         = ImVec4(0.08f, 0.030f, 0.030f, 0.85f);
+inline const ImVec4 kFrameHover    = ImVec4(0.20f, 0.070f, 0.060f, 0.90f);
+inline const ImVec4 kFrameActive   = ImVec4(0.26f, 0.090f, 0.080f, 0.95f);
+inline const ImVec4 kButtonBase    = ImVec4(0.26f, 0.080f, 0.070f, 1.00f);
+inline const ImVec4 kTabBase       = ImVec4(0.18f, 0.060f, 0.060f, 1.00f);
+inline const ImVec4 kScrollBg      = ImVec4(0.08f, 0.030f, 0.030f, 0.60f);
+inline const ImVec4 kPopup         = ImVec4(0.10f, 0.035f, 0.035f, 0.98f);
+#else
+inline const ImVec4 kBgTop         = ImVec4(0.09f, 0.03f, 0.08f, 1.00f);  // near-black plum
+inline const ImVec4 kBgBottom      = ImVec4(0.16f, 0.05f, 0.13f, 1.00f);  // deep maroon
+inline const ImVec4 kCard          = ImVec4(0.17f, 0.06f, 0.15f, 0.92f);
+inline const ImVec4 kCardHover     = ImVec4(0.21f, 0.08f, 0.19f, 0.95f);
+inline const ImVec4 kCardBorder    = ImVec4(0.85f, 0.25f, 0.55f, 0.35f);
+inline const ImVec4 kPink          = ImVec4(0.98f, 0.25f, 0.58f, 1.00f);  // primary neon pink
+inline const ImVec4 kPinkSoft      = ImVec4(0.98f, 0.25f, 0.58f, 0.55f);
+inline const ImVec4 kPinkDim       = ImVec4(0.55f, 0.18f, 0.38f, 1.00f);
+inline const ImVec4 kGold          = ImVec4(0.98f, 0.80f, 0.35f, 1.00f);
+inline const ImVec4 kGreen         = ImVec4(0.45f, 0.92f, 0.55f, 1.00f);
+inline const ImVec4 kRed           = ImVec4(0.95f, 0.30f, 0.35f, 1.00f);
+inline const ImVec4 kTextDim       = ImVec4(0.80f, 0.68f, 0.76f, 0.70f);
+inline const ImVec4 kTextBright    = ImVec4(0.98f, 0.94f, 0.97f, 1.00f);
+inline const ImVec4 kFrame         = ImVec4(0.10f, 0.04f, 0.09f, 0.85f);
+inline const ImVec4 kFrameHover    = ImVec4(0.22f, 0.08f, 0.18f, 0.90f);
+inline const ImVec4 kFrameActive   = ImVec4(0.28f, 0.10f, 0.22f, 0.95f);
+inline const ImVec4 kButtonBase    = ImVec4(0.30f, 0.10f, 0.22f, 1.00f);
+inline const ImVec4 kTabBase       = ImVec4(0.20f, 0.07f, 0.17f, 1.00f);
+inline const ImVec4 kScrollBg      = ImVec4(0.10f, 0.04f, 0.09f, 0.60f);
+inline const ImVec4 kPopup         = ImVec4(0.12f, 0.04f, 0.10f, 0.98f);
+#endif
 
 inline void Apply(ImGuiStyle& style) {
     style.WindowRounding    = 14.0f;
@@ -42,12 +73,12 @@ inline void Apply(ImGuiStyle& style) {
     c[ImGuiCol_WindowBg]          = kBgBottom;
     c[ImGuiCol_ChildBg]           = kCard;
     c[ImGuiCol_Border]            = kCardBorder;
-    c[ImGuiCol_FrameBg]           = ImVec4(0.10f, 0.04f, 0.09f, 0.85f);
-    c[ImGuiCol_FrameBgHovered]    = ImVec4(0.22f, 0.08f, 0.18f, 0.9f);
-    c[ImGuiCol_FrameBgActive]     = ImVec4(0.28f, 0.10f, 0.22f, 0.95f);
+    c[ImGuiCol_FrameBg]           = kFrame;
+    c[ImGuiCol_FrameBgHovered]    = kFrameHover;
+    c[ImGuiCol_FrameBgActive]     = kFrameActive;
     c[ImGuiCol_Text]              = kTextBright;
     c[ImGuiCol_TextDisabled]      = kTextDim;
-    c[ImGuiCol_Button]            = ImVec4(0.30f, 0.10f, 0.22f, 1.0f);
+    c[ImGuiCol_Button]            = kButtonBase;
     c[ImGuiCol_ButtonHovered]     = ImVec4(kPink.x, kPink.y, kPink.z, 0.85f);
     c[ImGuiCol_ButtonActive]      = kPink;
     c[ImGuiCol_Header]            = ImVec4(kPink.x, kPink.y, kPink.z, 0.35f);
@@ -56,17 +87,17 @@ inline void Apply(ImGuiStyle& style) {
     c[ImGuiCol_CheckMark]         = kPink;
     c[ImGuiCol_SliderGrab]        = kPink;
     c[ImGuiCol_SliderGrabActive]  = kGold;
-    c[ImGuiCol_Tab]               = ImVec4(0.20f, 0.07f, 0.17f, 1.0f);
+    c[ImGuiCol_Tab]               = kTabBase;
     c[ImGuiCol_TabHovered]        = ImVec4(kPink.x, kPink.y, kPink.z, 0.7f);
     c[ImGuiCol_TabActive]         = kPinkDim;
     c[ImGuiCol_PlotLines]         = kPink;
     c[ImGuiCol_PlotLinesHovered]  = kGold;
     c[ImGuiCol_PlotHistogram]     = kPink;
-    c[ImGuiCol_ScrollbarBg]       = ImVec4(0.10f, 0.04f, 0.09f, 0.6f);
+    c[ImGuiCol_ScrollbarBg]       = kScrollBg;
     c[ImGuiCol_ScrollbarGrab]     = kPinkDim;
     c[ImGuiCol_ScrollbarGrabHovered] = kPink;
     c[ImGuiCol_Separator]         = kCardBorder;
-    c[ImGuiCol_PopupBg]           = ImVec4(0.12f, 0.04f, 0.10f, 0.98f);
+    c[ImGuiCol_PopupBg]           = kPopup;
 }
 
 // Draws the diagonal plum->maroon backdrop gradient plus a few soft
